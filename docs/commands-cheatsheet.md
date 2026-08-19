@@ -70,3 +70,20 @@ every PR and push to `main` — see `.github/workflows/ci.yml`.
 ```bash
 curl http://localhost:4000/api/health
 ```
+
+## Auth (Phase 1)
+
+```bash
+# register
+curl -X POST http://localhost:4000/api/auth/register \
+  -H "Content-Type: application/json" \
+  -d '{"name":"Ada","email":"ada@example.com","password":"supersecret123"}'
+
+# login
+curl -X POST http://localhost:4000/api/auth/login \
+  -H "Content-Type: application/json" \
+  -d '{"email":"ada@example.com","password":"supersecret123"}'
+
+# current user (needs a token from the responses above)
+curl http://localhost:4000/api/auth/me -H "Authorization: Bearer <token>"
+```

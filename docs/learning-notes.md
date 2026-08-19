@@ -161,3 +161,221 @@ default-export behavior.
 Add a new env var `REQUEST_BODY_LIMIT` (default `"100kb"`) to `env.ts` and
 use it in `app.ts`'s `express.json({ limit: ... })` instead of the
 hard-coded string.
+
+---
+
+## Phase 1 — Authentication
+
+### What we built
+
+**Backend**
+- `models/User.ts` — a Mongoose schema with `name`, unique `email`,
+  `passwordHash` (`select: false` so it's never returned by default),
+  and `role` (`user | reviewer | admin`, default `user`).
+- `schemas/auth.schema.ts` — Zod schemas for register/login request bodies.
+- `services/auth.service.ts` — `registerUser`, `loginUser`, `getUserById`:
+  hashes passwords with bcrypt (12 salt rounds), issues a JWT, and always
+  strips `passwordHash` from anything returned to a controller.
+- `utils/jwt.ts` — `signAccessToken` / `verifyAccessToken` wrapping
+  `jsonwebtoken`.
+- `middleware/auth.ts` — `requireAuth` (authentication: is there a valid
+  token?) and `requireRole(...roles)` (authorization: is this user allowed?).
+- `middleware/rateLimit.ts` — a tighter rate limit specifically on
+  `/api/auth/*` to slow down credential stuffing.
+- `utils/asyncHandler.ts` — wraps async controllers so a rejected promise
+  reaches the centralized `errorHandler` (Express 4 doesn't do this
+  automatically).
+- Routes: `POST /api/auth/register`, `POST /api/auth/login`,
+  `GET /api/auth/me` (protected).
+- `server/src/tests/globalSetup.ts` + `auth.test.ts` + `jwt.test.ts` — a
+  real in-memory MongoDB (`mongodb-memory-server`) backs Supertest
+  integration tests; a plain unit test covers the JWT round-trip.
+
+**Frontend**
+- `context/AuthContext.tsx` + `hooks/useAuth.ts` — the authenticated user is
+  server state, fetched with TanStack Query (`GET /api/auth/me`) whenever a
+  token exists in `localStorage`; login/register call the API, store the
+  token, and seed the query cache directly with `setQueryData` (no extra
+  round-trip needed).
+- `components/ProtectedRoute.tsx` — a layout route using React Router's
+  `<Outlet/>` that redirects to `/login` (preserving the attempted location)
+  when there's no user.
+- `components/FormField.tsx` — a reusable labeled input, wired for React
+  Hook Form via `forwardRef` (see the bug below).
+- `pages/Login.tsx`, `pages/Register.tsx` — React Hook Form + Zod
+  (`schemas/auth.schema.ts`, mirroring the backend's validation rules),
+  with disabled-while-submitting buttons and a visible API error banner.
+- `pages/Dashboard.tsx` (placeholder), `pages/NotFound.tsx` (404).
+- `App.tsx` now defines real routes; `main.tsx` wraps the app in
+  `QueryClientProvider` → `BrowserRouter` → `AuthProvider`.
+- Component tests (`Login.test.tsx`, `ProtectedRoute.test.tsx`) mock the
+  `api/auth.api` module and assert on real DOM behavior (validation
+  messages, error banners, redirects) via Testing Library + `userEvent`.
+
+### Concepts learned
+
+**Authentication vs. authorization.** `requireAuth` answers "who are you?"
+(valid JWT → `req.user` is set, otherwise 401). `requireRole(...)` answers
+"are you allowed to do this?" (checks `req.user.role`, otherwise 403) — and
+it only makes sense to run *after* `requireAuth`.
+
+**Why bcrypt, not plain hashing.** `bcrypt.hash(password, 12)` is
+deliberately slow (12 "salt rounds" ≈ 2¹² iterations) and generates a random
+salt automatically, embedded in the resulting hash. This makes brute-forcing
+leaked hashes and rainbow-table attacks impractical, unlike a fast
+general-purpose hash (SHA-256) which is *designed* to be fast — the wrong
+property for passwords.
+
+**Generic auth error messages.** `loginUser` throws the exact same
+`401 UNAUTHORIZED` / "Invalid email or password" whether the email doesn't
+exist or the password is wrong. Returning "no such user" vs. "wrong
+password" would let an attacker enumerate valid emails.
+
+**Server state vs. client state, for real this time.** The current user is
+*server* state — it lives on the backend and can go stale (token expires,
+role changes). `AuthContext` fetches it with `useQuery` instead of copying
+it into local `useState` at login time and hoping it stays in sync; a
+successful login/register just seeds the cache directly with
+`queryClient.setQueryData` instead of triggering a redundant `/me` request.
+
+### Important code
+
+```ts
+// server/src/services/auth.service.ts — same error for both failure modes
+const user = await User.findOne({ email: input.email }).select('+passwordHash');
+if (!user) throw AppError.unauthorized('Invalid email or password');
+const ok = await bcrypt.compare(input.password, user.passwordHash);
+if (!ok) throw AppError.unauthorized('Invalid email or password');
+```
+
+```tsx
+// client/src/context/AuthContext.tsx — auth user as TanStack Query state
+const { data: user, isLoading } = useQuery({
+  queryKey: ['auth', 'me'],
+  queryFn: fetchCurrentUser,
+  enabled: hasToken,   // don't even try without a stored token
+  retry: false,
+});
+```
+
+### Important commands
+
+```bash
+npm run test --workspace server   # Vitest + Supertest + mongodb-memory-server
+npm run test --workspace client   # Vitest + React Testing Library
+curl -X POST http://localhost:4000/api/auth/register \
+  -H "Content-Type: application/json" \
+  -d '{"name":"Ada","email":"ada@example.com","password":"supersecret123"}'
+```
+
+### Problems solved
+
+**Bug:** In the browser, typing into the Login/Register form's email and
+password fields updated the visible input (confirmed via
+`input.value` in a debug script) but React Hook Form still reported them as
+empty ("Required") on submit — `loginRequest` was never called.
+
+**What I thought caused it (hint given first):** *Hint: check what
+`{...register('email')}` actually returns, and where each of those props
+ends up once you pass them through a second component instead of straight
+onto an `<input>`.*
+
+**Root cause:** `FormField` was a plain function component receiving
+`{...register('email')}` as props. `register()` returns
+`{ name, onChange, onBlur, ref }`. React treats `ref` specially **only at
+the JSX call site for the component actually being instantiated** — when
+that component is a plain function component (not wrapped in
+`React.forwardRef`), React strips `ref` out before the function ever runs
+and logs a dev warning ("Function components cannot be given refs"). So
+`FormField` silently never received a `ref` to forward to its inner
+`<input>`, React Hook Form's internal field registration never attached to
+the real DOM node, and every field was permanently "unregistered" — hence
+always empty at submit time, regardless of what the user typed.
+
+**Fix:** Wrap `FormField` in `forwardRef<HTMLInputElement, FormFieldProps>`
+and explicitly pass the forwarded `ref` to the `<input>`.
+
+**Prevention:** Any time you wrap a native form element in your own
+component *and* need `ref` to work (form libraries, focus management,
+measuring size), that wrapper must use `forwardRef` — plain function
+components cannot receive `ref` as a prop, full stop. A quick way to catch
+this class of bug: check the browser console for React's own
+"Function components cannot be given refs" warning; it points directly at
+the mistake.
+
+### Interview questions
+
+1. **Why is a generic "Invalid email or password" better than distinct
+   "user not found" / "wrong password" messages?** — Prevents email/account
+   enumeration by an attacker probing which emails are registered.
+2. **What's the difference between `requireAuth` and `requireRole` in this
+   codebase, and why does order matter?** — Authentication (is this a valid
+   token?) vs. authorization (is this role allowed?); `requireRole` reads
+   `req.user`, which only exists after `requireAuth` has run.
+3. **Why does a plain function component silently drop a `ref` prop, and
+   how do you fix it?** — React only forwards `ref` to a component's own
+   implementation when it's wrapped in `React.forwardRef`; otherwise React
+   intercepts and drops it (with a dev warning) before the function runs.
+   Fix: wrap the component in `forwardRef`.
+
+### What I should remember
+
+- `bcrypt` salt rounds trade off security for CPU cost — 10–12 is a common
+  default for real apps.
+- A JWT's payload is base64-encoded, **not encrypted** — never put secrets
+  in it; here it only carries `sub` (user id) and `role`.
+- Server state (anything that can change on the backend independent of this
+  browser tab) belongs in TanStack Query, not `useState` + `useEffect`.
+- `forwardRef` is required any time a custom component needs to accept a
+  `ref` meant for a native DOM element inside it.
+
+---
+
+### Phase 1 review
+
+**TOP 5 THINGS TO REMEMBER**
+1. Authentication ("who are you") and authorization ("are you allowed") are
+   two different middleware concerns — keep them as two functions.
+2. Never let a login endpoint reveal whether the *email* or the *password*
+   was wrong — same generic message, same status code, either way.
+3. `select: false` on a sensitive Mongoose field (like `passwordHash`) keeps
+   it out of query results by default; opt in with `.select('+passwordHash')`
+   only where you actually need it (during login).
+4. A `ref` passed to a plain function component is silently dropped — wrap
+   with `forwardRef` whenever a wrapper needs to forward one.
+5. Seed the TanStack Query cache directly after a mutation
+   (`queryClient.setQueryData`) instead of invalidating and re-fetching data
+   you already have in hand.
+
+**TOP 5 INTERVIEW QUESTIONS**
+1. Why hash passwords with bcrypt instead of SHA-256?
+2. What's inside a JWT, and is it encrypted?
+3. Authentication vs. authorization — give a one-sentence definition of each.
+4. Why must email-enumeration be avoided on a login endpoint?
+5. Why does `forwardRef` exist, and when do you need it?
+
+**TOP 3 DEVELOPMENT TIPS**
+1. Build the error-shape contract (`{ error: { code, message } }`) and stick
+   to it from the very first real endpoint — the frontend's `getApiErrorMessage`
+   helper depends on it being consistent everywhere.
+2. Write the Zod validation schema once conceptually, then implement it
+   twice on purpose — once on the server (source of truth, security
+   boundary) and once on the client (fast feedback, UX) — rather than trying
+   to literally share one file across a client/server boundary that doesn't
+   share a build step.
+3. When a form "isn't working" and the DOM looks right, check for dropped
+   refs, stale closures, or a missing `defaultValues` before assuming the
+   validation library is broken.
+
+**TOP 3 COMMON MISTAKES**
+1. Wrapping a form input in a custom component without `forwardRef`.
+2. Forgetting `defaultValues` on `useForm`, so untouched fields validate as
+   `undefined` and show a generic "Required" instead of the schema's real
+   message.
+3. Trusting client-side validation alone — always re-validate on the server;
+   the browser's rules are a UX nicety, not a security boundary.
+
+**MINI CODING EXERCISE**
+Add a `confirmPassword` field to the Register form (client-only — the
+server doesn't need it) using Zod's `.refine()` to assert it matches
+`password`, with the error attached to the `confirmPassword` field.

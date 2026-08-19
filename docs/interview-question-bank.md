@@ -80,6 +80,76 @@ custom formatting.
 **Follow-up Question:** What's the difference between calling `next()` and
 `next(err)` inside a normal route handler?
 
+## React
+
+### Question: Why did a `ref` passed through a custom wrapper component silently fail to reach the real `<input>`?
+**Short Answer:** The wrapper wasn't wrapped in `forwardRef`.
+**Strong Answer:** React only forwards a `ref` prop to a component's own
+render logic when that component is created via `React.forwardRef`. For a
+plain function component, React intercepts and drops any `ref` passed to it
+before the function body ever runs (with a dev-mode console warning) —
+because React doesn't know what DOM node or instance that ref should
+attach to. This is exactly what happened with this project's `FormField`
+component: React Hook Form's `register('email')` returns a `ref` callback
+meant for the real `<input>`, but since `FormField` wasn't wrapped in
+`forwardRef`, that `ref` never reached the input, so RHF never "saw" the
+field — it stayed permanently unregistered, and typed values were invisible
+to the form on submit.
+**Project Example:** `client/src/components/FormField.tsx`, wrapped with
+`forwardRef<HTMLInputElement, FormFieldProps>` and explicitly rendering
+`<input ref={ref} ... />`.
+**Common Mistake:** Assuming a form "just isn't submitting" is a validation
+library bug, without checking the browser console for React's own ref
+warning first.
+**Follow-up Question:** Would this bug have been caught by TypeScript alone?
+Why or why not?
+
+## Authentication
+
+### Question: Why does this app return the exact same error for "unknown email" and "wrong password"?
+**Short Answer:** To prevent account/email enumeration.
+**Strong Answer:** If a login endpoint returns a distinct message for "no
+account with that email" vs. "wrong password", an attacker can script
+attempts against a list of email addresses and learn — without ever
+guessing a correct password — which of those emails have accounts on the
+system. That's a privacy/security leak on its own (confirming someone is a
+user of a service), and it also narrows a credential-stuffing attack's
+search space. Returning one generic `401 UNAUTHORIZED` / "Invalid email or
+password" for both cases closes that side channel.
+**Project Example:** `server/src/services/auth.service.ts`'s `loginUser`
+throws the identical `AppError.unauthorized('Invalid email or password')`
+whether `User.findOne` returns nothing or `bcrypt.compare` returns false.
+**Common Mistake:** Optimizing for developer-friendly error messages during
+login ("no account found for that email") without considering what that
+message reveals to an attacker.
+**Follow-up Question:** Does the same "don't leak which case failed"
+principle apply to the *register* endpoint's "email already in use" error?
+Why might that case be different?
+
+## Security
+
+### Question: Who enforces CORS — the browser or the server?
+**Short Answer:** The browser enforces it; the server just declares a policy.
+**Strong Answer:** CORS is fundamentally a **browser-side** security
+mechanism. The server sends `Access-Control-Allow-Origin` (and related)
+response headers describing which origins are permitted to read its
+responses via JavaScript; it's the requesting *browser* that inspects those
+headers and blocks the page's script from reading the response if the
+origin isn't allowed. The server still processes the request and sends a
+real response either way — CORS doesn't stop the request from happening,
+it stops the browser from *exposing the response* to the calling page's
+script. Non-browser clients (curl, Postman, server-to-server calls, mobile
+apps) aren't affected by CORS at all, since there's no browser enforcing it.
+**Project Example:** `server/src/app.ts` configures
+`cors({ origin: env.CORS_ORIGIN, credentials: true })`, so only requests
+originating from the configured frontend origin can read API responses
+from a browser context.
+**Common Mistake:** Believing a CORS error in the browser console means the
+server "blocked" or "rejected" the request — the server usually processed
+it fine; the browser just hid the response from the page's JavaScript.
+**Follow-up Question:** Why does the CORS spec forbid combining a wildcard
+`origin: '*'` with `credentials: true`?
+
 ## Git
 
 ### Question: What belongs in `.gitignore` for a full-stack Node/React project?

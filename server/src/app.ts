@@ -6,6 +6,7 @@ import { requestLogger } from './middleware/requestLogger.js';
 import { notFoundHandler } from './middleware/notFound.js';
 import { errorHandler } from './middleware/errorHandler.js';
 import { healthRouter } from './routes/health.routes.js';
+import { authRouter } from './routes/auth.routes.js';
 
 export function createApp(): Express {
   const app = express();
@@ -16,6 +17,7 @@ export function createApp(): Express {
   app.use(requestLogger);
 
   app.use('/api/health', healthRouter);
+  app.use('/api/auth', authRouter);
 
   app.use(notFoundHandler);
   app.use(errorHandler);

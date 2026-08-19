@@ -54,6 +54,192 @@ hard-coded `'info'`.
 
 ---
 
+## C. React
+
+**Development Tips**
+- Keep server state (data that lives on the backend) in TanStack Query;
+  keep client/UI state (form inputs, toggles) in local `useState`.
+- Don't copy props into `useState` "just in case" — read them directly, or
+  derive values during render instead of syncing them with `useEffect`.
+- Wrap custom components in `forwardRef` if they need to accept a `ref`
+  meant for a native element inside them.
+
+**Common Mistakes**
+- Wrapping a form `<input>` in a component without `forwardRef`, silently
+  breaking any library (React Hook Form, focus management) that needs a
+  real DOM ref.
+- Treating server data as client state: fetching it once into `useState`
+  and never revalidating, so the UI silently goes stale.
+
+**Debugging Tips**
+- React's own console warnings are precise — "Function components cannot be
+  given refs" points directly at a missing `forwardRef`.
+- React DevTools' Components tab shows the live props/state of a mounted
+  component — faster than sprinkling `console.log` through render.
+
+**Interview Questions**
+1. What causes a React component to re-render?
+2. When should you *not* reach for `useEffect`?
+3. What is `forwardRef` for, and when do you need it?
+
+**Strong Interview Answers**
+- *What causes a re-render?* A component re-renders when its own state
+  changes, its parent re-renders (and it isn't memoized), or a context value
+  it subscribes to changes. Props changing is really a special case of "the
+  parent re-rendered and passed a new value."
+
+**Project Example**
+`AuthContext` keeps the authenticated user as TanStack Query server state
+instead of local `useState`; `ProtectedRoute` reads it via `useAuth()` and
+redirects with `<Navigate/>` when there's no user.
+
+**Mini Exercise**
+Convert `Dashboard.tsx`'s inline JSX for the "signed in as…" line into a
+small reusable `<UserBadge user={user} />` component that takes a typed
+`User` prop.
+
+---
+
+## D. React Router
+
+**Development Tips**
+- Centralize route definitions in one place (`App.tsx`) rather than scattering
+  `<Route>` declarations across the codebase.
+- Model "requires login" as a layout route wrapping children with `<Outlet/>`,
+  not as a check duplicated inside every page component.
+- Preserve the attempted location (`state: { from: location }`) when
+  redirecting to `/login`, so a successful login can send the user back.
+
+**Common Mistakes**
+- Checking auth state inside every protected page instead of once, in a
+  shared `ProtectedRoute` wrapper.
+- Forgetting `replace: true` on a redirect after login/logout, leaving a
+  confusing back-button trail through pages the user shouldn't revisit.
+
+**Debugging Tips**
+- If a protected route renders even though the user should be logged out,
+  check whether the loading state is being handled — redirecting *during*
+  an in-flight "am I logged in?" query is a classic race.
+
+**Interview Questions**
+1. What is a protected route, and how do you implement one with React Router?
+2. What's the difference between a route param (`/trades/:id`) and a query
+   param (`?status=approved`)?
+3. How do you navigate programmatically after an action (e.g. after login)?
+
+**Strong Interview Answers**
+- *How do you implement a protected route?* Wrap the routes that require
+  auth in a layout route whose element checks auth state: while loading,
+  show a loading state; if unauthenticated, `<Navigate to="/login" />`
+  (ideally carrying the attempted path in `state`); otherwise render
+  `<Outlet/>` so the real nested route renders.
+
+**Project Example**
+`components/ProtectedRoute.tsx` wraps `/dashboard` (and will wrap `/trades/*`
+in Phase 3); `Login.tsx` reads `location.state.from` to return the user to
+where they were headed.
+
+**Mini Exercise**
+Add a `RoleRoute` variant that also checks `user.role`, redirecting to a
+"not authorized" page instead of rendering `<Outlet/>` for the wrong role —
+this is exactly what Phase 4's reviewer-only actions will need.
+
+---
+
+## E. TanStack Query
+
+**Development Tips**
+- Choose query keys that describe *what* the data is (`['auth', 'me']`,
+  `['trades', { page, status }]`), not how you fetch it.
+- Use `enabled` to skip queries that can't succeed yet (no token → don't
+  fetch `/me`).
+- After a mutation, either invalidate the affected query key or, if you
+  already have the fresh data (e.g. login's response), seed the cache
+  directly with `setQueryData` — cheaper and instant.
+
+**Common Mistakes**
+- Manually tracking loading/error state with `useState` next to a query that
+  already exposes `isLoading`/`isError`.
+- Forgetting `enabled`, causing a query to fire (and fail) before its
+  prerequisites (like an auth token) exist.
+
+**Debugging Tips**
+- React Query Devtools (not yet installed here, worth adding in Phase 3)
+  show every query's status, cache, and staleness live.
+- A query stuck on `isLoading: true` forever usually means `queryFn` never
+  resolves or rejects — check for a swallowed promise.
+
+**Interview Questions**
+1. Why use TanStack Query instead of `useEffect` + `fetch` + `useState`?
+2. What does `enabled: false` do?
+3. What's the difference between `invalidateQueries` and `setQueryData`?
+
+**Strong Interview Answers**
+- *Why TanStack Query over useEffect+fetch?* It replaces a lot of
+  hand-rolled, easy-to-get-wrong logic — request deduplication, caching,
+  background refetching, loading/error state, retries — with a declarative
+  `useQuery` call, and treats server data as fundamentally different from
+  local UI state (it can go stale outside of React's control).
+
+**Project Example**
+`AuthContext`'s `useQuery(['auth', 'me'], fetchCurrentUser, { enabled: hasToken })`
+only runs once a token exists, and `login`/`register` seed that same cache
+key directly with the response instead of triggering a second request.
+
+**Mini Exercise**
+Add `staleTime: Infinity` to the `/auth/me` query and explain, in a comment,
+why that's a reasonable choice given the user object rarely changes during a
+session.
+
+---
+
+## F. Forms + Zod
+
+**Development Tips**
+- Validate the same rules on both client (fast feedback) and server
+  (the actual security boundary) — never trust the client copy alone.
+- Set `defaultValues` on every `useForm` call so untouched fields are typed
+  strings (`''`), not `undefined`, at submit time.
+- Attach `aria-invalid` and `aria-describedby` to inputs so validation
+  errors are accessible, not just visually adjacent.
+
+**Common Mistakes**
+- Skipping `defaultValues`, causing Zod's generic "Required" message to
+  appear instead of your custom, more helpful one.
+- Wrapping a registered `<input>` in a component without `forwardRef` (see
+  the React section) — the single most common way a form "just doesn't
+  submit" for no visible reason.
+
+**Debugging Tips**
+- Log `formState.errors` directly to see exactly what Zod rejected and why.
+- If a field never seems to register, check the browser console for React's
+  ref warning first.
+
+**Interview Questions**
+1. Why validate on both the frontend and backend instead of just one?
+2. What does `zodResolver` do?
+3. What's the risk of relying on browser-native `required`/`type="email"`
+   validation alone?
+
+**Strong Interview Answers**
+- *Why validate on both ends?* Frontend validation is a UX convenience —
+  instant feedback without a round-trip. Backend validation is the actual
+  security/data-integrity boundary: any client (a browser, curl, a malicious
+  script) can send arbitrary data directly to the API, bypassing whatever
+  the frontend enforces.
+
+**Project Example**
+`schemas/auth.schema.ts` exists in both `client/` and `server/` with
+matching rules (min password length, valid email); the server's is the one
+that actually protects the database.
+
+**Mini Exercise**
+Add a `.superRefine()` to the client's register schema that rejects
+passwords equal to the email's local part (before the `@`) — a simple,
+teachable custom validation rule.
+
+---
+
 ## G. Node.js
 
 **Development Tips**
@@ -144,6 +330,115 @@ or thrown error still reaches them.
 Add a `requestId` field to the JSON error body in `errorHandler.ts`, pulled
 from `req.id` (set by `pino-http`), so a client-visible error can be
 correlated with a specific server log line.
+
+---
+
+## K. Authentication + JWT
+
+**Development Tips**
+- Hash passwords with bcrypt (or argon2); never store or log plaintext.
+- Keep the JWT payload minimal — an id and a role, not the whole user
+  object; it's readable by anyone (base64, not encrypted).
+- Return the same generic error for "no such user" and "wrong password".
+- Keep `JWT_SECRET` out of source control; validate its presence (and
+  minimum length) at boot.
+
+**Common Mistakes**
+- Storing sensitive data in a JWT payload, forgetting it's only
+  *signed*, not encrypted — anyone can decode and read it.
+- Returning different error messages/status codes for "unknown email" vs.
+  "wrong password", leaking which emails are registered.
+- Logging the raw password or token anywhere, even at debug level.
+
+**Debugging Tips**
+- Decode a JWT at [jwt.io] (or `jwt.decode()`, no secret needed) to inspect
+  its payload during debugging — but verifying the signature is what
+  actually matters for trust.
+- A `401` on a protected route with a valid-looking token usually means an
+  expired token, a `JWT_SECRET` mismatch (e.g. between environments), or a
+  missing `Bearer ` prefix on the `Authorization` header.
+
+**Interview Questions**
+1. What's inside a JWT, and is it encrypted?
+2. Why hash passwords instead of encrypting them (reversibly)?
+3. Where should a JWT be stored on the client, and what are the tradeoffs?
+
+**Strong Interview Answers**
+- *Where should a JWT be stored client-side?* Common options: `localStorage`
+  (simple, but readable by any JS on the page — vulnerable to XSS) or an
+  httpOnly cookie (immune to JS/XSS reading it, but needs CSRF protection
+  and more server-side wiring). This project uses `localStorage` for
+  simplicity, appropriate for a portfolio app — a production app handling
+  sensitive data would weigh httpOnly cookies more seriously.
+- *Why hash instead of encrypt?* Encryption is reversible by design (you can
+  decrypt with the right key) — the server should never need to recover the
+  original password, only verify a guess against it. A one-way hash (bcrypt)
+  means even a full database leak doesn't hand over usable passwords, only
+  hashes that are deliberately expensive to crack.
+
+**Project Example**
+`services/auth.service.ts` signs `{ sub: user._id, role: user.role }`;
+`middleware/auth.ts`'s `requireAuth` verifies it and attaches the payload to
+`req.user` for every downstream handler.
+
+**Mini Exercise**
+Decode a token issued by `POST /api/auth/login` at jwt.io (or with
+`node -e "console.log(require('jsonwebtoken').decode(process.argv[1]))" <token>`)
+and confirm it contains no password, name, or email — only `sub` and `role`.
+
+---
+
+## L. Security
+
+**Development Tips**
+- Validate all untrusted input at the boundary (Zod on every request body).
+- Use `helmet()` for sensible default security headers.
+- Configure CORS to an explicit origin list, not `*`, once you have real
+  frontend domains.
+- Rate-limit sensitive endpoints (login/register) separately from the rest
+  of the API.
+- Never leak stack traces or internal error details to the client in
+  production.
+
+**Common Mistakes**
+- Trusting `Content-Type` or client-side validation as if they were a
+  security boundary.
+- Leaving CORS wide open (`origin: '*'`) with credentials enabled — the spec
+  actually forbids combining wildcard origin with credentials, which is a
+  hint credentials + wildcard CORS was never a safe combination.
+- Returning verbose error messages/stack traces from a production API.
+
+**Debugging Tips**
+- A blocked request that never reaches your route handler, with a CORS
+  error in the browser console, is a browser-enforced check — inspect the
+  `Access-Control-*` response headers, not the server logs, first.
+- `429 Too Many Requests` locally during testing usually means you've hit
+  your own rate limiter — check `windowMs`/`limit` before assuming a bug.
+
+**Interview Questions**
+1. What is CORS, and why does the browser enforce it (not the server)?
+2. What does `helmet()` actually do?
+3. Why rate-limit login specifically?
+
+**Strong Interview Answers**
+- *What is CORS and who enforces it?* CORS (Cross-Origin Resource Sharing)
+  is a **browser** security mechanism, not a server one — the server just
+  advertises which origins may read its responses (via
+  `Access-Control-Allow-Origin` and related headers), and the browser
+  enforces that policy client-side. A non-browser client (curl, a mobile
+  app, server-to-server) is entirely unaffected by CORS; it only protects
+  browser users from a malicious page silently reading responses from a
+  site the victim is authenticated against.
+
+**Project Example**
+`app.ts` applies `helmet()` and a `cors({ origin: env.CORS_ORIGIN })`
+allow-list; `middleware/rateLimit.ts`'s `authRateLimiter` caps login/register
+attempts to 20 per 15 minutes per IP.
+
+**Mini Exercise**
+Temporarily set `CORS_ORIGIN` to a different port than the client's dev
+server, restart, and observe the browser console CORS error — then explain
+in one sentence why curl to the same endpoint still works fine.
 
 ---
 
