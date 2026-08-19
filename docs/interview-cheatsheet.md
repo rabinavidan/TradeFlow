@@ -51,6 +51,20 @@ For a wide Q&A bank see [interview-question-bank.md](interview-question-bank.md)
   *current state* makes it impossible (e.g. trying to edit an `Approved`
   trade request).
 
+## RBAC + Workflow
+
+- **Transition table over conditionals**: `TRANSITIONS[currentStatus]` maps
+  to allowed next statuses + which roles may perform each — readable as
+  data, easy to extend, and testable in isolation from Express entirely.
+- **Validate the action before the actor**: check the transition itself is
+  legal (`409` if not) before checking whether *this* requester is allowed
+  to perform it (`403` if not) — different failure reasons, different codes.
+- **Audit trail = append-only**: `StatusHistory` is never updated/deleted,
+  only created — that immutability is what makes it trustworthy.
+- **Client-side RBAC mirror is UX, not enforcement**: `StatusActions.tsx`
+  predicts what buttons should be shown; the server independently
+  re-validates every transition regardless of what the UI offered.
+
 ## MongoDB
 
 - **Indexes are designed around real queries**: `{ createdBy: 1, createdAt: -1 }`

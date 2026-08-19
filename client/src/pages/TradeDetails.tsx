@@ -1,9 +1,17 @@
 import { useState } from 'react';
 import { Link, useNavigate, useParams } from 'react-router-dom';
-import { useTradeQuery, useDeleteTradeMutation } from '../hooks/useTrades';
+import {
+  useChangeStatusMutation,
+  useDeleteTradeMutation,
+  useTradeHistoryQuery,
+  useTradeQuery,
+} from '../hooks/useTrades';
 import { useAuth } from '../hooks/useAuth';
 import { StatusBadge } from '../components/StatusBadge';
+import { StatusActions } from '../components/StatusActions';
+import { StatusHistoryList } from '../components/StatusHistoryList';
 import { getApiErrorMessage } from '../api/client';
+import type { TradeStatus } from '../types/trade';
 
 const EDITABLE_STATUSES = new Set(['Draft', 'Rejected']);
 
@@ -12,7 +20,9 @@ export function TradeDetails() {
   const navigate = useNavigate();
   const { user } = useAuth();
   const { data: trade, isLoading, isError, error } = useTradeQuery(id);
+  const { data: history } = useTradeHistoryQuery(id);
   const deleteTrade = useDeleteTradeMutation();
+  const changeStatus = useChangeStatusMutation(id as string);
   const [apiError, setApiError] = useState<string | null>(null);
 
   if (isLoading) {
@@ -48,6 +58,15 @@ export function TradeDetails() {
     }
   };
 
+  const handleChangeStatus = async (status: TradeStatus, comment: string) => {
+    setApiError(null);
+    try {
+      await changeStatus.mutateAsync({ status, comment });
+    } catch (err) {
+      setApiError(getApiErrorMessage(err, 'Could not update the status.'));
+    }
+  };
+
   return (
     <main className="page">
       <div className="page-header">
@@ -80,6 +99,15 @@ export function TradeDetails() {
         <dd>{new Date(trade.updatedAt).toLocaleString()}</dd>
       </dl>
 
+      {user && (
+        <StatusActions
+          trade={trade}
+          user={user}
+          onChangeStatus={handleChangeStatus}
+          isSubmitting={changeStatus.isPending}
+        />
+      )}
+
       <div className="detail-actions">
         <Link to="/trades" className="btn-secondary">
           Back to list
@@ -95,6 +123,11 @@ export function TradeDetails() {
           </>
         )}
       </div>
+
+      <section className="history-section">
+        <h2>Status history</h2>
+        <StatusHistoryList history={history ?? []} />
+      </section>
     </main>
   );
 }

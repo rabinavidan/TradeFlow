@@ -14,11 +14,11 @@ export interface Paginated<T> {
 }
 
 /** Reviewers and admins triage every request; a plain user only sees their own. */
-function canSeeAllTrades(role: AccessTokenPayload['role']): boolean {
+export function canSeeAllTrades(role: AccessTokenPayload['role']): boolean {
   return role === 'reviewer' || role === 'admin';
 }
 
-function isOwnerOrPrivileged(trade: TradeRequestDoc, requester: AccessTokenPayload): boolean {
+export function isOwnerOrPrivileged(trade: TradeRequestDoc, requester: AccessTokenPayload): boolean {
   return trade.createdBy.toString() === requester.sub || canSeeAllTrades(requester.role);
 }
 

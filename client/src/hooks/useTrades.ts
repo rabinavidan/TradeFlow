@@ -1,13 +1,15 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import {
+  changeTradeStatus,
   createTradeRequest,
   deleteTradeRequest,
   fetchTrade,
+  fetchTradeHistory,
   fetchTrades,
   updateTradeRequest,
 } from '../api/trade.api';
 import type { TradeFormValues } from '../schemas/trade.schema';
-import type { TradeListParams } from '../types/trade';
+import type { TradeListParams, TradeStatus } from '../types/trade';
 
 export function useTradesQuery(params: TradeListParams) {
   return useQuery({
@@ -51,6 +53,27 @@ export function useDeleteTradeMutation() {
   return useMutation({
     mutationFn: (id: string) => deleteTradeRequest(id),
     onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['trades', 'list'] });
+    },
+  });
+}
+
+export function useTradeHistoryQuery(id: string | undefined) {
+  return useQuery({
+    queryKey: ['trades', 'history', id],
+    queryFn: () => fetchTradeHistory(id as string),
+    enabled: Boolean(id),
+  });
+}
+
+export function useChangeStatusMutation(id: string) {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: ({ status, comment }: { status: TradeStatus; comment?: string }) =>
+      changeTradeStatus(id, status, comment),
+    onSuccess: (trade) => {
+      queryClient.setQueryData(['trades', 'detail', id], trade);
+      queryClient.invalidateQueries({ queryKey: ['trades', 'history', id] });
       queryClient.invalidateQueries({ queryKey: ['trades', 'list'] });
     },
   });

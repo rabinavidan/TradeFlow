@@ -1,6 +1,8 @@
 import type { Request, Response } from 'express';
 import { createTradeSchema, listTradesQuerySchema, updateTradeSchema } from '../schemas/trade.schema.js';
+import { statusTransitionSchema } from '../schemas/statusTransition.schema.js';
 import { createTrade, deleteTrade, getTradeById, listTrades, updateTrade } from '../services/trade.service.js';
+import { changeTradeStatus, getTradeHistory } from '../services/workflow.service.js';
 import { AppError } from '../utils/AppError.js';
 
 function requireUser(req: Request) {
@@ -41,4 +43,17 @@ export async function remove(req: Request, res: Response): Promise<void> {
   const requester = requireUser(req);
   await deleteTrade(req.params.id, requester);
   res.status(204).send();
+}
+
+export async function changeStatus(req: Request, res: Response): Promise<void> {
+  const requester = requireUser(req);
+  const input = statusTransitionSchema.parse(req.body);
+  const trade = await changeTradeStatus(req.params.id, input.status, input.comment, requester);
+  res.status(200).json({ trade });
+}
+
+export async function history(req: Request, res: Response): Promise<void> {
+  const requester = requireUser(req);
+  const entries = await getTradeHistory(req.params.id, requester);
+  res.status(200).json({ history: entries });
 }

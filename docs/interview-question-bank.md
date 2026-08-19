@@ -229,6 +229,30 @@ unnecessary extra request and a brief loading flicker.
 the *list* query instead of `invalidateQueries`, after an edit changes a
 trade's status such that it no longer matches the list's active status filter?
 
+## Testing
+
+### Question: Why did adding a third server test file break a previously-passing test in a different file, with no code change to that test?
+**Short Answer:** Shared database state + parallel test file execution.
+**Strong Answer:** All server integration test files in this project share
+a single in-memory MongoDB instance (started once in `globalSetup.ts` for
+the entire test run, not per file). Vitest, like most modern test runners,
+runs test *files* in parallel by default for speed. A test in one file
+asserting on an *unscoped* query result (e.g. "a reviewer sees all trades
+in the database" → `total: 2`) is implicitly assuming it's the only file
+touching that collection at that moment. Once a third file existed that
+also created trade requests, it could do so concurrently with that
+assertion running, and the unscoped query legitimately returned more
+documents than the test author expected — not a bug in either file
+individually, but an emergent race between them.
+**Project Example:** `server/vitest.config.ts` sets `fileParallelism: false`
+after this was discovered, trading some test-suite speed for determinism
+against the shared in-memory database.
+**Common Mistake:** Debugging this kind of failure by staring at the failing
+test's own code for a long time — the bug isn't there; it's in an
+assumption about isolation that stopped being true once the suite grew.
+**Follow-up Question:** What's an alternative fix that would let test files
+run in parallel again while keeping this kind of test safe?
+
 ## Git
 
 ### Question: What belongs in `.gitignore` for a full-stack Node/React project?

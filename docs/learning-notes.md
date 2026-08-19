@@ -755,3 +755,199 @@ should pass, check the actual argument count/shape
 **MINI CODING EXERCISE**
 Add a `sortBy` dropdown to `TradeList` (Title / Amount / Created date) wired
 to the existing `useTradesQuery` params — the backend already supports it.
+
+---
+
+## Phase 4 — Roles + Workflow
+
+### What we built
+
+- `models/StatusHistory.ts` — an append-only audit trail: `tradeRequestId`,
+  `previousStatus`, `newStatus`, `changedBy`, `comment`, and `createdAt`
+  (aliased to `changedAt` on output — a status change is immutable once
+  recorded, so there's deliberately no `updatedAt`).
+- `services/workflow.service.ts` — a `TRANSITIONS` table that is the single
+  source of truth for both *what* transitions exist
+  (`Draft → Submitted → In Review → Approved/Rejected`) and *who* may
+  perform each one (`owner`, `reviewer`, `admin`). `changeTradeStatus`
+  checks the transition is valid, checks the requester is allowed, updates
+  the trade, and appends a `StatusHistory` record — in that order, so an
+  invalid or unauthorized request never touches the database.
+- `PATCH /api/trades/:id/status` and `GET /api/trades/:id/history` routes.
+- Client-side mirror: `components/StatusActions.tsx` has its own copy of the
+  same `TRANSITIONS` table, purely to decide which buttons to *show* —
+  clearly commented as UX only, never a security boundary.
+- `components/StatusHistoryList.tsx` renders the audit trail with the
+  reviewer's name/role (via `.populate('changedBy', 'name role')` on the
+  server) and any comment left with the decision.
+- 9 new integration tests (owner-submits-own-draft, RBAC rejections in both
+  directions, the full Submitted → In Review → Approved happy path with
+  history assertions, invalid transitions, terminal-state rejection) plus 7
+  new component tests for `StatusActions`' visibility logic.
+
+### Concepts learned
+
+**One transition table, two "views" of it.** The business rule ("who can
+move a request from X to Y") is genuinely defined once — in
+`workflow.service.ts`. The frontend's copy in `StatusActions.tsx` isn't a
+second *source of truth*; it's a UX prediction of what the backend will
+allow, so the UI doesn't offer a button that would immediately 403. If they
+ever drift out of sync, the backend still wins — a user might see (or not
+see) a slightly wrong button, but can never actually perform a
+disallowed transition.
+
+**Business rules as a data structure, not a pile of `if`s.** `TRANSITIONS`
+is a plain object mapping current status → allowed next statuses → allowed
+roles. This makes the whole workflow readable at a glance, and adding a new
+transition later is a one-line data change instead of a new branch in a
+growing `if/else` chain.
+
+**Audit trails are append-only by design.** `StatusHistory` documents are
+never updated or deleted — each status change creates a new record. This is
+what makes it a trustworthy audit trail: nobody (including a bug) can quietly
+edit history after the fact, only add to it.
+
+### Important code
+
+```ts
+// server/src/services/workflow.service.ts — one table, two questions answered
+const TRANSITIONS: Record<TradeStatus, { to: TradeStatus; allowedRoles: Role[] }[]> = {
+  Draft: [{ to: 'Submitted', allowedRoles: ['owner', 'admin'] }],
+  Submitted: [{ to: 'In Review', allowedRoles: ['reviewer', 'admin'] }],
+  'In Review': [
+    { to: 'Approved', allowedRoles: ['reviewer', 'admin'] },
+    { to: 'Rejected', allowedRoles: ['reviewer', 'admin'] },
+  ],
+  Approved: [],
+  Rejected: [],
+};
+```
+
+```ts
+// server/src/services/workflow.service.ts — validate transition, THEN authorize, THEN mutate
+const validNextStatuses = TRANSITIONS[trade.status]?.map((r) => r.to) ?? [];
+if (!validNextStatuses.includes(toStatus)) throw AppError.conflict(/* ... */);
+if (!isTransitionAllowedForRequester(trade, toStatus, requester)) throw AppError.forbidden(/* ... */);
+// only now: trade.status = toStatus; await trade.save(); await StatusHistory.create(...)
+```
+
+### Important commands
+
+```bash
+curl -X PATCH http://localhost:4000/api/trades/<id>/status \
+  -H "Authorization: Bearer <token>" -H "Content-Type: application/json" \
+  -d '{"status":"Submitted"}'
+
+curl http://localhost:4000/api/trades/<id>/history -H "Authorization: Bearer <token>"
+```
+
+### Problems solved
+
+**Bug:** After adding `workflow.test.ts` (a 3rd server test file), an
+existing, previously-passing test in `trade.test.ts` started failing —
+`GET /api/trades > scopes results to the caller for a plain user, but not
+for a reviewer` expected `total: 2` but got `total: 3`.
+
+**What I thought caused it (hint given first):** *Hint: nothing in
+`trade.test.ts` itself changed. What else runs at the same time now that
+didn't before, and what do all the test files have in common?*
+
+**Root cause:** Every server test file shares **one** in-memory MongoDB
+instance (started once in `globalSetup.ts` for the whole run). Vitest runs
+test *files* in parallel by default. Once a third file existed,
+`workflow.test.ts`'s tests could be creating trade requests in the shared
+database at the exact moment `trade.test.ts`'s reviewer-visibility test ran
+its unscoped `find({})` query (a reviewer sees *all* trades) — so it
+occasionally counted trades from a completely different, concurrently-running
+test file.
+
+**Fix:** Set `fileParallelism: false` in `server/vitest.config.ts`, so test
+files run one at a time against the shared database.
+
+**Prevention:** Any assertion on an *unscoped* query ("all documents in this
+collection") is unsafe against shared state run in parallel — either give
+each test file its own isolated database/collection namespace, or run
+files sequentially when they share state. For this project's size, running
+sequentially was the simpler, more honest fix.
+
+### Interview questions
+
+1. **Why does `changeTradeStatus` check "is this transition valid" before
+   "is this requester allowed to do it"?** — Order matters for correct error
+   codes: an invalid transition is a `409` (bad request regardless of who's
+   asking); an unauthorized valid transition is `403`. Checking validity
+   first also means we never leak "you'd be allowed to do this, but the
+   transition itself doesn't exist."
+2. **Why is `StatusHistory` never updated or deleted, only created?** — It's
+   an audit trail; its value comes entirely from being an immutable,
+   append-only record of what actually happened, in order.
+3. **Why did parallel test files cause a previously-passing test to
+   fail after a new file was added — and why not before?** — All test files
+   share one in-memory database; an unscoped query run in a race with
+   concurrent test files created by an unrelated file can pick up their
+   data. It didn't happen before because there was no test creating
+   competing data at the exact right moment — an unlucky-then-lucky timing
+   window, which is exactly what makes shared-state races so easy to miss
+   until they aren't.
+
+### What I should remember
+
+- Encode business rules ("who can do what, from what state") as a data
+  table you can read top-to-bottom, not nested conditionals.
+- Client-side copies of authorization rules are for UX prediction only —
+  write a comment saying so, right next to the code, so nobody mistakes it
+  for enforcement later.
+- Validate *what* before *who* — check the action itself is legal before
+  checking whether this particular requester may perform it.
+- Shared test state (one DB for the whole suite) plus parallel test files is
+  a recipe for flaky, hard-to-reproduce failures — decide test isolation
+  strategy deliberately, not by accident.
+
+---
+
+### Phase 4 review
+
+**TOP 5 THINGS TO REMEMBER**
+1. Model a workflow as a transition table (current state → allowed next
+   states → allowed roles), not scattered conditionals.
+2. Check "is this transition valid" before "is this requester allowed" —
+   different failure modes deserve different status codes (409 vs 403).
+3. An audit trail (`StatusHistory`) should only ever be appended to, never
+   mutated — that's what makes it trustworthy.
+4. A client-side permission mirror controls what's shown, never what's
+   allowed — the server re-checks everything, always.
+5. Shared database state across parallel test files can produce
+   intermittent, confusing failures — prefer sequential test execution or
+   real per-file isolation.
+
+**TOP 5 INTERVIEW QUESTIONS**
+1. How would you design a status-transition system that's easy to extend
+   with a new status later?
+2. Why validate the transition itself before validating the requester's
+   permission to perform it?
+3. Why should an audit-trail collection never support updates or deletes?
+4. What's the actual security boundary when both client and server encode
+   the same authorization rule?
+5. Why can parallel test execution against shared state cause a previously
+   passing test to fail without that test itself changing?
+
+**TOP 3 DEVELOPMENT TIPS**
+1. Write the transition/permission table as an explicit, readable data
+   structure — it becomes both the implementation and the documentation.
+2. When mirroring a backend rule on the frontend for UX, comment clearly
+   that it's a prediction, not enforcement — future-you (or a teammate)
+   should never mistake it for the real check.
+3. Decide test isolation strategy (shared DB + sequential, or per-file
+   isolated DB) deliberately as the test suite grows, not after the first
+   flaky failure.
+
+**TOP 3 COMMON MISTAKES**
+1. Encoding a workflow as deeply nested `if/else` instead of a lookup table.
+2. Trusting a frontend permission check as if it were the real enforcement.
+3. Letting integration tests race against shared, unscoped database state
+   without either isolation or sequential execution.
+
+**MINI CODING EXERCISE**
+Add a `Rejected → Draft` transition (allowing the owner to revise and
+resubmit a rejected request) to both `TRANSITIONS` tables, plus a test
+confirming the owner — and only the owner — can perform it.

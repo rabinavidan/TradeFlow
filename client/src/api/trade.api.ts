@@ -1,5 +1,5 @@
 import { apiClient } from './client';
-import type { PaginatedResult, TradeListParams, TradeRequest } from '../types/trade';
+import type { PaginatedResult, StatusHistoryEntry, TradeListParams, TradeRequest, TradeStatus } from '../types/trade';
 import type { TradeFormValues } from '../schemas/trade.schema';
 
 export async function fetchTrades(params: TradeListParams): Promise<PaginatedResult<TradeRequest>> {
@@ -27,4 +27,18 @@ export async function updateTradeRequest(
 
 export async function deleteTradeRequest(id: string): Promise<void> {
   await apiClient.delete(`/trades/${id}`);
+}
+
+export async function changeTradeStatus(
+  id: string,
+  status: TradeStatus,
+  comment?: string,
+): Promise<TradeRequest> {
+  const res = await apiClient.patch<{ trade: TradeRequest }>(`/trades/${id}/status`, { status, comment });
+  return res.data.trade;
+}
+
+export async function fetchTradeHistory(id: string): Promise<StatusHistoryEntry[]> {
+  const res = await apiClient.get<{ history: StatusHistoryEntry[] }>(`/trades/${id}/history`);
+  return res.data.history;
 }

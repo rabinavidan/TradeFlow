@@ -42,6 +42,16 @@ export interface PaginatedResult<T> {
   };
 }
 
+export interface StatusHistoryEntry {
+  id: string;
+  tradeRequestId: string;
+  previousStatus: TradeStatus;
+  newStatus: TradeStatus;
+  changedBy: { id: string; name: string; role: string } | string;
+  comment: string;
+  changedAt: string;
+}
+
 export interface TradeListParams {
   page: number;
   limit: number;
