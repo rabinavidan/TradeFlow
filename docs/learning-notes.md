@@ -161,3 +161,2151 @@ default-export behavior.
 Add a new env var `REQUEST_BODY_LIMIT` (default `"100kb"`) to `env.ts` and
 use it in `app.ts`'s `express.json({ limit: ... })` instead of the
 hard-coded string.
+
+---
+
+## Phase 1 — Authentication
+
+### What we built
+
+**Backend**
+- `models/User.ts` — a Mongoose schema with `name`, unique `email`,
+  `passwordHash` (`select: false` so it's never returned by default),
+  and `role` (`user | reviewer | admin`, default `user`).
+- `schemas/auth.schema.ts` — Zod schemas for register/login request bodies.
+- `services/auth.service.ts` — `registerUser`, `loginUser`, `getUserById`:
+  hashes passwords with bcrypt (12 salt rounds), issues a JWT, and always
+  strips `passwordHash` from anything returned to a controller.
+- `utils/jwt.ts` — `signAccessToken` / `verifyAccessToken` wrapping
+  `jsonwebtoken`.
+- `middleware/auth.ts` — `requireAuth` (authentication: is there a valid
+  token?) and `requireRole(...roles)` (authorization: is this user allowed?).
+- `middleware/rateLimit.ts` — a tighter rate limit specifically on
+  `/api/auth/*` to slow down credential stuffing.
+- `utils/asyncHandler.ts` — wraps async controllers so a rejected promise
+  reaches the centralized `errorHandler` (Express 4 doesn't do this
+  automatically).
+- Routes: `POST /api/auth/register`, `POST /api/auth/login`,
+  `GET /api/auth/me` (protected).
+- `server/src/tests/globalSetup.ts` + `auth.test.ts` + `jwt.test.ts` — a
+  real in-memory MongoDB (`mongodb-memory-server`) backs Supertest
+  integration tests; a plain unit test covers the JWT round-trip.
+
+**Frontend**
+- `context/AuthContext.tsx` + `hooks/useAuth.ts` — the authenticated user is
+  server state, fetched with TanStack Query (`GET /api/auth/me`) whenever a
+  token exists in `localStorage`; login/register call the API, store the
+  token, and seed the query cache directly with `setQueryData` (no extra
+  round-trip needed).
+- `components/ProtectedRoute.tsx` — a layout route using React Router's
+  `<Outlet/>` that redirects to `/login` (preserving the attempted location)
+  when there's no user.
+- `components/FormField.tsx` — a reusable labeled input, wired for React
+  Hook Form via `forwardRef` (see the bug below).
+- `pages/Login.tsx`, `pages/Register.tsx` — React Hook Form + Zod
+  (`schemas/auth.schema.ts`, mirroring the backend's validation rules),
+  with disabled-while-submitting buttons and a visible API error banner.
+- `pages/Dashboard.tsx` (placeholder), `pages/NotFound.tsx` (404).
+- `App.tsx` now defines real routes; `main.tsx` wraps the app in
+  `QueryClientProvider` → `BrowserRouter` → `AuthProvider`.
+- Component tests (`Login.test.tsx`, `ProtectedRoute.test.tsx`) mock the
+  `api/auth.api` module and assert on real DOM behavior (validation
+  messages, error banners, redirects) via Testing Library + `userEvent`.
+
+### Concepts learned
+
+**Authentication vs. authorization.** `requireAuth` answers "who are you?"
+(valid JWT → `req.user` is set, otherwise 401). `requireRole(...)` answers
+"are you allowed to do this?" (checks `req.user.role`, otherwise 403) — and
+it only makes sense to run *after* `requireAuth`.
+
+**Why bcrypt, not plain hashing.** `bcrypt.hash(password, 12)` is
+deliberately slow (12 "salt rounds" ≈ 2¹² iterations) and generates a random
+salt automatically, embedded in the resulting hash. This makes brute-forcing
+leaked hashes and rainbow-table attacks impractical, unlike a fast
+general-purpose hash (SHA-256) which is *designed* to be fast — the wrong
+property for passwords.
+
+**Generic auth error messages.** `loginUser` throws the exact same
+`401 UNAUTHORIZED` / "Invalid email or password" whether the email doesn't
+exist or the password is wrong. Returning "no such user" vs. "wrong
+password" would let an attacker enumerate valid emails.
+
+**Server state vs. client state, for real this time.** The current user is
+*server* state — it lives on the backend and can go stale (token expires,
+role changes). `AuthContext` fetches it with `useQuery` instead of copying
+it into local `useState` at login time and hoping it stays in sync; a
+successful login/register just seeds the cache directly with
+`queryClient.setQueryData` instead of triggering a redundant `/me` request.
+
+### Important code
+
+```ts
+// server/src/services/auth.service.ts — same error for both failure modes
+const user = await User.findOne({ email: input.email }).select('+passwordHash');
+if (!user) throw AppError.unauthorized('Invalid email or password');
+const ok = await bcrypt.compare(input.password, user.passwordHash);
+if (!ok) throw AppError.unauthorized('Invalid email or password');
+```
+
+```tsx
+// client/src/context/AuthContext.tsx — auth user as TanStack Query state
+const { data: user, isLoading } = useQuery({
+  queryKey: ['auth', 'me'],
+  queryFn: fetchCurrentUser,
+  enabled: hasToken,   // don't even try without a stored token
+  retry: false,
+});
+```
+
+### Important commands
+
+```bash
+npm run test --workspace server   # Vitest + Supertest + mongodb-memory-server
+npm run test --workspace client   # Vitest + React Testing Library
+curl -X POST http://localhost:4000/api/auth/register \
+  -H "Content-Type: application/json" \
+  -d '{"name":"Ada","email":"ada@example.com","password":"supersecret123"}'
+```
+
+### Problems solved
+
+**Bug:** In the browser, typing into the Login/Register form's email and
+password fields updated the visible input (confirmed via
+`input.value` in a debug script) but React Hook Form still reported them as
+empty ("Required") on submit — `loginRequest` was never called.
+
+**What I thought caused it (hint given first):** *Hint: check what
+`{...register('email')}` actually returns, and where each of those props
+ends up once you pass them through a second component instead of straight
+onto an `<input>`.*
+
+**Root cause:** `FormField` was a plain function component receiving
+`{...register('email')}` as props. `register()` returns
+`{ name, onChange, onBlur, ref }`. React treats `ref` specially **only at
+the JSX call site for the component actually being instantiated** — when
+that component is a plain function component (not wrapped in
+`React.forwardRef`), React strips `ref` out before the function ever runs
+and logs a dev warning ("Function components cannot be given refs"). So
+`FormField` silently never received a `ref` to forward to its inner
+`<input>`, React Hook Form's internal field registration never attached to
+the real DOM node, and every field was permanently "unregistered" — hence
+always empty at submit time, regardless of what the user typed.
+
+**Fix:** Wrap `FormField` in `forwardRef<HTMLInputElement, FormFieldProps>`
+and explicitly pass the forwarded `ref` to the `<input>`.
+
+**Prevention:** Any time you wrap a native form element in your own
+component *and* need `ref` to work (form libraries, focus management,
+measuring size), that wrapper must use `forwardRef` — plain function
+components cannot receive `ref` as a prop, full stop. A quick way to catch
+this class of bug: check the browser console for React's own
+"Function components cannot be given refs" warning; it points directly at
+the mistake.
+
+### Interview questions
+
+1. **Why is a generic "Invalid email or password" better than distinct
+   "user not found" / "wrong password" messages?** — Prevents email/account
+   enumeration by an attacker probing which emails are registered.
+2. **What's the difference between `requireAuth` and `requireRole` in this
+   codebase, and why does order matter?** — Authentication (is this a valid
+   token?) vs. authorization (is this role allowed?); `requireRole` reads
+   `req.user`, which only exists after `requireAuth` has run.
+3. **Why does a plain function component silently drop a `ref` prop, and
+   how do you fix it?** — React only forwards `ref` to a component's own
+   implementation when it's wrapped in `React.forwardRef`; otherwise React
+   intercepts and drops it (with a dev warning) before the function runs.
+   Fix: wrap the component in `forwardRef`.
+
+### What I should remember
+
+- `bcrypt` salt rounds trade off security for CPU cost — 10–12 is a common
+  default for real apps.
+- A JWT's payload is base64-encoded, **not encrypted** — never put secrets
+  in it; here it only carries `sub` (user id) and `role`.
+- Server state (anything that can change on the backend independent of this
+  browser tab) belongs in TanStack Query, not `useState` + `useEffect`.
+- `forwardRef` is required any time a custom component needs to accept a
+  `ref` meant for a native DOM element inside it.
+
+---
+
+### Phase 1 review
+
+**TOP 5 THINGS TO REMEMBER**
+1. Authentication ("who are you") and authorization ("are you allowed") are
+   two different middleware concerns — keep them as two functions.
+2. Never let a login endpoint reveal whether the *email* or the *password*
+   was wrong — same generic message, same status code, either way.
+3. `select: false` on a sensitive Mongoose field (like `passwordHash`) keeps
+   it out of query results by default; opt in with `.select('+passwordHash')`
+   only where you actually need it (during login).
+4. A `ref` passed to a plain function component is silently dropped — wrap
+   with `forwardRef` whenever a wrapper needs to forward one.
+5. Seed the TanStack Query cache directly after a mutation
+   (`queryClient.setQueryData`) instead of invalidating and re-fetching data
+   you already have in hand.
+
+**TOP 5 INTERVIEW QUESTIONS**
+1. Why hash passwords with bcrypt instead of SHA-256?
+2. What's inside a JWT, and is it encrypted?
+3. Authentication vs. authorization — give a one-sentence definition of each.
+4. Why must email-enumeration be avoided on a login endpoint?
+5. Why does `forwardRef` exist, and when do you need it?
+
+**TOP 3 DEVELOPMENT TIPS**
+1. Build the error-shape contract (`{ error: { code, message } }`) and stick
+   to it from the very first real endpoint — the frontend's `getApiErrorMessage`
+   helper depends on it being consistent everywhere.
+2. Write the Zod validation schema once conceptually, then implement it
+   twice on purpose — once on the server (source of truth, security
+   boundary) and once on the client (fast feedback, UX) — rather than trying
+   to literally share one file across a client/server boundary that doesn't
+   share a build step.
+3. When a form "isn't working" and the DOM looks right, check for dropped
+   refs, stale closures, or a missing `defaultValues` before assuming the
+   validation library is broken.
+
+**TOP 3 COMMON MISTAKES**
+1. Wrapping a form input in a custom component without `forwardRef`.
+2. Forgetting `defaultValues` on `useForm`, so untouched fields validate as
+   `undefined` and show a generic "Required" instead of the schema's real
+   message.
+3. Trusting client-side validation alone — always re-validate on the server;
+   the browser's rules are a UX nicety, not a security boundary.
+
+**MINI CODING EXERCISE**
+Add a `confirmPassword` field to the Register form (client-only — the
+server doesn't need it) using Zod's `.refine()` to assert it matches
+`password`, with the error attached to the `confirmPassword` field.
+
+---
+
+## Phase 2 — Trade Backend
+
+### What we built
+
+- `models/TradeRequest.ts` — title, customerName, amount, currency, country,
+  requestType (enum), description, status (enum, default `Draft`),
+  `createdBy` (ref `User`). Compound indexes for the two real query
+  patterns (`{ createdBy, createdAt }` for "my requests, newest first" and
+  `{ status, createdAt }` for a reviewer's queue), plus a text index on
+  `title`/`customerName` for search. A schema-level `toJSON` transform turns
+  Mongoose's `_id`/`__v` into a clean `id` field for every API response.
+- `schemas/trade.schema.ts` — `createTradeSchema` (strict), `updateTradeSchema`
+  (the same shape, `.partial()` — every field optional for `PUT`),
+  `listTradesQuerySchema` (page/limit/search/status/requestType/sortBy/sortOrder,
+  all with sane defaults via `z.coerce` since query strings arrive as text).
+- `services/trade.service.ts` — the actual business rules:
+  - **Visibility**: a plain `user` only ever sees their own trades; `reviewer`
+    and `admin` see everything. Enforced by scoping the MongoDB filter itself
+    (`{ createdBy: requester.sub }`), not by filtering results after the
+    fact — so pagination counts stay correct.
+  - **Ownership**: viewing/editing/deleting someone else's trade as a
+    non-privileged user is a `403`, not a silent empty result.
+  - **Editability**: only `Draft`/`Rejected` trades can be edited or deleted
+    by their owner (an `Approved` request shouldn't be quietly rewritten);
+    `admin` can override. This is a deliberately light guard — the *real*
+    status workflow (who can move a trade from `Submitted` to `In Review`,
+    etc.) is Phase 4's job.
+- Routes: `GET /api/trades` (list), `POST /api/trades` (create),
+  `GET/PUT/DELETE /api/trades/:id` — all behind `requireAuth`.
+- 12 new Supertest integration tests covering auth requirement, ownership
+  scoping (user vs. reviewer), pagination, search, status filtering,
+  validation errors, and the editability guard.
+
+### Concepts learned
+
+**Scoping the query, not the results.** `listTrades` builds a MongoDB
+`filter` object that already excludes other users' trades for a plain user
+— `TradeRequest.find(filter)` and `countDocuments(filter)` both use it. This
+is different (and much better) than fetching *all* trades and filtering them
+in JavaScript afterward: the database does the work, pagination totals stay
+accurate, and there's no risk of accidentally including a document in one
+step but not the other.
+
+**A JWT's role claim is a snapshot, not a live value.** While testing
+reviewer-only visibility, promoting a test user's DB role to `reviewer`
+*after* they'd already registered had no effect on their existing token —
+because the token's `role` claim was baked in at sign-time. The fix (in the
+test, and in reality) is to re-authenticate after a role change; there's no
+way for a previously-issued JWT to "notice" a later DB change without some
+form of token refresh or revocation list. This is a real, common gotcha with
+any stateless-token auth system, not just a test artifact.
+
+**`z.coerce` for query strings.** Every value in `req.query` arrives as a
+string (`"page=2"` → `"2"`, never the number `2`). `z.coerce.number()`
+converts-then-validates in one step, so `listTradesQuerySchema.parse(req.query)`
+can just be used directly instead of hand-parsing each param.
+
+**Editable-status guard vs. Phase 4's workflow.** It would have been
+tempting to build the full `Draft → Submitted → In Review → Approved/Rejected`
+state machine right now, but that's explicitly a separate concern (RBAC +
+audit history) — Phase 2 only needed "can this trade still be freely
+edited," which only needs to distinguish "still a draft/rejected" from
+"already in the pipeline."
+
+### Important code
+
+```ts
+// server/src/services/trade.service.ts — scope the query, don't filter after
+const filter: Record<string, unknown> = canSeeAllTrades(requester.role)
+  ? {}
+  : { createdBy: requester.sub };
+// ...filter.status, filter.$or for search...
+const [data, total] = await Promise.all([
+  TradeRequest.find(filter).sort(sort).skip(skip).limit(query.limit),
+  TradeRequest.countDocuments(filter),
+]);
+```
+
+```ts
+// server/src/schemas/trade.schema.ts — query strings need coercion
+export const listTradesQuerySchema = z.object({
+  page: z.coerce.number().int().min(1).default(1),
+  limit: z.coerce.number().int().min(1).max(100).default(10),
+  // ...
+});
+```
+
+### Important commands
+
+```bash
+# create (needs a Bearer token from /api/auth/login)
+curl -X POST http://localhost:4000/api/trades \
+  -H "Authorization: Bearer <token>" -H "Content-Type: application/json" \
+  -d '{"title":"Import financing","customerName":"Acme","amount":25000,"currency":"usd","country":"Germany","requestType":"Letter of Credit"}'
+
+# list, paginated + filtered + searched
+curl "http://localhost:4000/api/trades?page=1&limit=10&status=Draft&search=Acme" \
+  -H "Authorization: Bearer <token>"
+```
+
+### Problems solved
+
+**Bug (in the test, not the app):** A test expected a promoted `reviewer`
+user to see all trades, but got `0` back instead of `2`.
+**What I thought caused it (hint given first):** *Hint: when exactly does
+the JWT's `role` claim get decided — at sign-time, or read fresh from the
+database on every request?*
+**Root cause:** The test elevated the user's role in MongoDB directly
+(`User.findByIdAndUpdate(..., { role: 'reviewer' })`) but kept using the
+JWT issued *before* that update — which still carried `role: 'user'` in its
+payload, since `requireAuth` trusts the token's claims rather than looking
+the user up fresh on every request (a deliberate performance tradeoff of
+stateless JWTs).
+**Fix:** Re-login after the role change in the test helper, so the returned
+token actually carries the new role.
+**Prevention:** In a real app, changing a user's role would need to either
+force re-login (short token expiry) or use a shorter-lived access token +
+refresh token pattern so privilege changes take effect promptly.
+
+### Interview questions
+
+1. **Why scope the MongoDB query itself instead of fetching everything and
+   filtering in application code?** — Correctness (pagination totals stay
+   accurate) and performance (the database does far less work, and never
+   sends data the requester isn't allowed to see over the wire).
+2. **Why does promoting a user's role in the database not immediately
+   affect requests made with their existing token?** — A JWT's claims are
+   fixed at sign-time; the server doesn't re-check the database on every
+   request unless it's designed to (which defeats much of the point of a
+   stateless token).
+3. **Why return `403` for viewing someone else's trade instead of `404`?**
+   — This project chooses to teach the distinction clearly (the resource
+   exists, you're just not allowed); note some real systems deliberately use
+   `404` instead specifically to avoid confirming a resource exists at all.
+
+### What I should remember
+
+- Build MongoDB filters conditionally and pass the *same* filter object to
+  both `find()` and `countDocuments()` — never let pagination metadata and
+  actual results drift apart.
+- `z.coerce` converts before validating — essential for anything coming from
+  `req.query` (always strings) or `req.params`.
+- A `409 Conflict` fits "the resource exists, but its current state doesn't
+  allow this action" (like editing a non-Draft trade) — different from `422`
+  (the request body itself is invalid) or `403` (you're not allowed, period).
+
+---
+
+### Phase 2 review
+
+**TOP 5 THINGS TO REMEMBER**
+1. Scope database queries for authorization — don't fetch-then-filter.
+2. A JWT's claims are a snapshot; role/permission changes need a fresh token
+   to take effect.
+3. `z.coerce.number()` (etc.) handles the string→typed conversion that every
+   query-string parameter needs.
+4. Use `Promise.all` for independent async calls (`find` + `countDocuments`)
+   instead of awaiting them one after another.
+5. `409 Conflict` = valid request, wrong resource *state*; `422` = the
+   request body itself is invalid; `403` = not allowed regardless of state.
+
+**TOP 5 INTERVIEW QUESTIONS**
+1. Why scope a MongoDB query instead of filtering results in JS afterward?
+2. What happens to already-issued JWTs when you change a user's role in the DB?
+3. What's the difference between 403 and 404, and when would you pick one over the other?
+4. Why use `Promise.all` for `find()` + `countDocuments()` here?
+5. What does a compound MongoDB index like `{ createdBy: 1, createdAt: -1 }` optimize for?
+
+**TOP 3 DEVELOPMENT TIPS**
+1. Design indexes around the queries you actually run (owner + recency,
+   status + recency), not defensively on every field.
+2. Keep the Zod schema for `PUT` as `createSchema.partial()` instead of a
+   hand-duplicated schema — one source of truth for field rules.
+3. Write the "who can see/edit/delete this" rule as small service-level
+   helper functions (`canSeeAllTrades`, `isOwnerOrPrivileged`) so
+   controllers stay declarative and the rule is unit-testable on its own.
+
+**TOP 3 COMMON MISTAKES**
+1. Filtering "my data only" in application code after an unscoped DB query —
+   works until pagination totals or performance expose the mistake.
+2. Assuming a role change takes effect immediately for a user already holding
+   a valid JWT.
+3. Reaching for `404` and `403` interchangeably without a consistent rule
+   for which one a given endpoint should use.
+
+**MINI CODING EXERCISE**
+Add a `minAmount`/`maxAmount` query filter to `listTradesQuerySchema` and
+`listTrades`, following the same pattern as `status`/`requestType`.
+
+---
+
+## Phase 3 — React UI
+
+### What we built
+
+- `components/Layout.tsx` — the authenticated shell (top nav + `<Outlet/>`),
+  separated from `ProtectedRoute` (auth *gate*) on purpose: one component
+  decides "can you be here," the other decides "what does 'here' look like."
+- `components/TradeForm.tsx` — one form, shared by `CreateTrade` and
+  `EditTrade` via props (`defaultValues`, `onSubmit`, `submitLabel`), instead
+  of two near-identical copies.
+- `components/StatusBadge.tsx`, `components/Pagination.tsx` — small, focused,
+  reusable presentational components.
+- `hooks/useTrades.ts` — `useTradesQuery`, `useTradeQuery`,
+  `useCreateTradeMutation`, `useUpdateTradeMutation`, `useDeleteTradeMutation`:
+  every trade-related server interaction goes through TanStack Query, with
+  mutations invalidating (`list`) or directly seeding (`detail`) the cache.
+- `hooks/useDebouncedValue.ts` — a tiny custom hook so the search box doesn't
+  fire a request on every keystroke.
+- `pages/TradeList.tsx` — pagination, status/type filters, debounced search,
+  and explicit loading/empty/error states (not just "spinner or nothing").
+- `pages/CreateTrade.tsx`, `pages/EditTrade.tsx`, `pages/TradeDetails.tsx` —
+  the full CRUD loop from the UI, with ownership/editable-status logic
+  mirrored from the backend to decide whether Edit/Delete are even shown.
+- New client component tests (`TradeList.test.tsx`, `TradeForm.test.tsx`)
+  covering loading/empty/error states, debounced search, and form validation
+  + normalization.
+
+### Concepts learned
+
+**Layout routes vs. guard routes.** `ProtectedRoute` and `Layout` are both
+"wrapper" components rendering `<Outlet/>`, but they answer different
+questions: is the user allowed here at all (auth), vs. what chrome (nav,
+header) wraps every authenticated page (presentation). Nesting them
+(`<ProtectedRoute><Layout><actual pages/></Layout></ProtectedRoute>`) keeps
+each one simple and independently testable.
+
+**One form, two pages.** `TradeForm` doesn't know or care whether it's
+creating or editing — it just takes `defaultValues` and an `onSubmit`
+callback. `CreateTrade` and `EditTrade` differ only in *what* they do with
+the submitted values (POST vs. PUT) and where they navigate afterward. This
+is composition over duplication: change a validation rule once, and both
+flows pick it up.
+
+**`placeholderData: (previous) => previous`.** Without it, changing a page
+number or filter shows a jarring loading flash between "page 1's data" and
+"page 2's data." With it, TanStack Query keeps rendering the *previous*
+result while the new one loads in the background — this project dims it
+slightly (`opacity: isPlaceholderData ? 0.6 : 1`) so it's still obvious a
+fetch is in flight.
+
+**Mirroring backend authorization in the UI is a UX nicety, not security.**
+`TradeDetails` computes `canEdit` client-side (ownership + editable status)
+purely to decide whether to *show* Edit/Delete buttons — a user could still
+hit the API directly. The actual enforcement is still 100% the backend's
+`trade.service.ts` checks from Phase 2; hiding the buttons just avoids
+showing a user a button that would 403 if clicked.
+
+### Important code
+
+```tsx
+// client/src/hooks/useTrades.ts — mutation seeds/invalidates the right cache
+export function useUpdateTradeMutation(id: string) {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (payload) => updateTradeRequest(id, payload),
+    onSuccess: (trade) => {
+      queryClient.setQueryData(['trades', 'detail', id], trade); // instant
+      queryClient.invalidateQueries({ queryKey: ['trades', 'list'] }); // eventually consistent
+    },
+  });
+}
+```
+
+```tsx
+// client/src/components/TradeForm.tsx — one schema/component, two callers
+<TradeForm defaultValues={trade} onSubmit={handleSubmit} submitLabel="Save changes" />
+```
+
+### Important commands
+
+```bash
+npm run dev:client   # http://localhost:5173/trades
+npm run test --workspace client
+```
+
+### Problems solved
+
+No new bugs this phase beyond test-authoring mistakes (documented as part
+of the "problems solved" pattern anyway, since they're genuinely
+instructive):
+
+**Test mistake:** A component test asserted
+`expect(onSubmit).toHaveBeenCalledWith(expect.objectContaining({...}))` and
+failed even though the printed "received" values looked identical to what
+was expected.
+**Root cause:** React Hook Form's `handleSubmit(onSubmit)` calls
+`onSubmit(values, event)` with **two** arguments, not one — the
+`SyntheticEvent` is passed along as the second argument.
+`toHaveBeenCalledWith` checks the *entire* argument list, so a single
+matcher for a two-argument call always fails, regardless of how well that
+one matcher matches the first argument.
+**Fix:** Assert on `onSubmit.mock.calls[0][0]` directly with `.toEqual(...)`
+instead of `toHaveBeenCalledWith(...)`, when you only care about one
+argument out of several.
+**Prevention:** When a mock assertion fails but the diff *looks* like it
+should pass, check the actual argument count/shape
+(`mock.calls[0]`) before assuming the values themselves are wrong.
+
+### Interview questions
+
+1. **Why separate `ProtectedRoute` (auth gate) from `Layout` (page chrome)
+   instead of one combined wrapper?** — Single responsibility: one decides
+   "allowed here," the other decides "what surrounds the page." Testable and
+   reusable independently (e.g. a future public page could reuse `Layout`'s
+   nav without the auth requirement).
+2. **Why does `TradeForm` accept `onSubmit` as a prop instead of calling the
+   create/update API directly?** — Keeps the form itself dumb/reusable;
+   `CreateTrade` and `EditTrade` own the decision of *which* API call to make
+   and where to navigate afterward — a classic "lift the side effect up"
+   pattern.
+3. **What does `queryClient.setQueryData` buy you over just calling
+   `invalidateQueries` after every mutation?** — Instant UI update with data
+   you already have in hand (no extra round-trip) for the exact record you
+   just changed, while still invalidating the *list* query (which the
+   mutation response doesn't fully describe — you don't know if the updated
+   record still matches the list's current filters/sort).
+
+### What I should remember
+
+- A form component that only knows about `defaultValues` + `onSubmit` can be
+  reused for both create and edit — don't build two forms.
+- `placeholderData` (formerly `keepPreviousData` in React Query v4) is the
+  fix for pagination/filter loading flicker.
+- Client-side permission checks control what's *shown*; server-side checks
+  control what's *allowed*. Never confuse the two, and never skip the latter.
+- Mock assertion failures that "look right" in the diff often mean an
+  argument-count mismatch, not a value mismatch — check `mock.calls` directly.
+
+---
+
+### Phase 3 review
+
+**TOP 5 THINGS TO REMEMBER**
+1. Separate the "can you be here" gate from the "what does here look like"
+   layout — two different concerns, two different components.
+2. One shared form component + a prop for the submit behavior beats two
+   near-duplicate forms.
+3. `placeholderData` keeps stale data on screen during a refetch instead of
+   flashing a loading state on every page/filter change.
+4. Debounce search input — don't fire a network request per keystroke.
+5. Client-side permission checks are UX, not security; the server remains
+   the actual enforcement point.
+
+**TOP 5 INTERVIEW QUESTIONS**
+1. Why does this app separate ProtectedRoute from Layout?
+2. How is one TradeForm reused for both create and edit?
+3. What problem does `placeholderData` solve?
+4. Why debounce a search input, and what would happen without it?
+5. Why does a mutation's `onSuccess` sometimes call `setQueryData` and
+   sometimes `invalidateQueries` — why not always the same one?
+
+**TOP 3 DEVELOPMENT TIPS**
+1. Build reusable presentational components (`StatusBadge`, `Pagination`)
+   the moment you notice a second place that would need the same markup —
+   not before, not much after.
+2. Give every list view three real states beyond "has data": loading,
+   empty, and error — each with its own visible feedback, not a blank screen.
+3. When wrapping a mutation, decide deliberately: does the response fully
+   replace what a query already has (→ `setQueryData`), or does it only
+   partially describe what changed (→ `invalidateQueries`)?
+
+**TOP 3 COMMON MISTAKES**
+1. Writing near-identical Create and Edit forms instead of one shared,
+   prop-driven component.
+2. Letting a list re-fetch on every keystroke in a search box instead of
+   debouncing.
+3. Assuming a mock assertion diff that "looks equal" must be a false
+   failure, instead of checking the actual call signature.
+
+**MINI CODING EXERCISE**
+Add a `sortBy` dropdown to `TradeList` (Title / Amount / Created date) wired
+to the existing `useTradesQuery` params — the backend already supports it.
+
+---
+
+## Phase 4 — Roles + Workflow
+
+### What we built
+
+- `models/StatusHistory.ts` — an append-only audit trail: `tradeRequestId`,
+  `previousStatus`, `newStatus`, `changedBy`, `comment`, and `createdAt`
+  (aliased to `changedAt` on output — a status change is immutable once
+  recorded, so there's deliberately no `updatedAt`).
+- `services/workflow.service.ts` — a `TRANSITIONS` table that is the single
+  source of truth for both *what* transitions exist
+  (`Draft → Submitted → In Review → Approved/Rejected`) and *who* may
+  perform each one (`owner`, `reviewer`, `admin`). `changeTradeStatus`
+  checks the transition is valid, checks the requester is allowed, updates
+  the trade, and appends a `StatusHistory` record — in that order, so an
+  invalid or unauthorized request never touches the database.
+- `PATCH /api/trades/:id/status` and `GET /api/trades/:id/history` routes.
+- Client-side mirror: `components/StatusActions.tsx` has its own copy of the
+  same `TRANSITIONS` table, purely to decide which buttons to *show* —
+  clearly commented as UX only, never a security boundary.
+- `components/StatusHistoryList.tsx` renders the audit trail with the
+  reviewer's name/role (via `.populate('changedBy', 'name role')` on the
+  server) and any comment left with the decision.
+- 9 new integration tests (owner-submits-own-draft, RBAC rejections in both
+  directions, the full Submitted → In Review → Approved happy path with
+  history assertions, invalid transitions, terminal-state rejection) plus 7
+  new component tests for `StatusActions`' visibility logic.
+
+### Concepts learned
+
+**One transition table, two "views" of it.** The business rule ("who can
+move a request from X to Y") is genuinely defined once — in
+`workflow.service.ts`. The frontend's copy in `StatusActions.tsx` isn't a
+second *source of truth*; it's a UX prediction of what the backend will
+allow, so the UI doesn't offer a button that would immediately 403. If they
+ever drift out of sync, the backend still wins — a user might see (or not
+see) a slightly wrong button, but can never actually perform a
+disallowed transition.
+
+**Business rules as a data structure, not a pile of `if`s.** `TRANSITIONS`
+is a plain object mapping current status → allowed next statuses → allowed
+roles. This makes the whole workflow readable at a glance, and adding a new
+transition later is a one-line data change instead of a new branch in a
+growing `if/else` chain.
+
+**Audit trails are append-only by design.** `StatusHistory` documents are
+never updated or deleted — each status change creates a new record. This is
+what makes it a trustworthy audit trail: nobody (including a bug) can quietly
+edit history after the fact, only add to it.
+
+### Important code
+
+```ts
+// server/src/services/workflow.service.ts — one table, two questions answered
+const TRANSITIONS: Record<TradeStatus, { to: TradeStatus; allowedRoles: Role[] }[]> = {
+  Draft: [{ to: 'Submitted', allowedRoles: ['owner', 'admin'] }],
+  Submitted: [{ to: 'In Review', allowedRoles: ['reviewer', 'admin'] }],
+  'In Review': [
+    { to: 'Approved', allowedRoles: ['reviewer', 'admin'] },
+    { to: 'Rejected', allowedRoles: ['reviewer', 'admin'] },
+  ],
+  Approved: [],
+  Rejected: [],
+};
+```
+
+```ts
+// server/src/services/workflow.service.ts — validate transition, THEN authorize, THEN mutate
+const validNextStatuses = TRANSITIONS[trade.status]?.map((r) => r.to) ?? [];
+if (!validNextStatuses.includes(toStatus)) throw AppError.conflict(/* ... */);
+if (!isTransitionAllowedForRequester(trade, toStatus, requester)) throw AppError.forbidden(/* ... */);
+// only now: trade.status = toStatus; await trade.save(); await StatusHistory.create(...)
+```
+
+### Important commands
+
+```bash
+curl -X PATCH http://localhost:4000/api/trades/<id>/status \
+  -H "Authorization: Bearer <token>" -H "Content-Type: application/json" \
+  -d '{"status":"Submitted"}'
+
+curl http://localhost:4000/api/trades/<id>/history -H "Authorization: Bearer <token>"
+```
+
+### Problems solved
+
+**Bug:** After adding `workflow.test.ts` (a 3rd server test file), an
+existing, previously-passing test in `trade.test.ts` started failing —
+`GET /api/trades > scopes results to the caller for a plain user, but not
+for a reviewer` expected `total: 2` but got `total: 3`.
+
+**What I thought caused it (hint given first):** *Hint: nothing in
+`trade.test.ts` itself changed. What else runs at the same time now that
+didn't before, and what do all the test files have in common?*
+
+**Root cause:** Every server test file shares **one** in-memory MongoDB
+instance (started once in `globalSetup.ts` for the whole run). Vitest runs
+test *files* in parallel by default. Once a third file existed,
+`workflow.test.ts`'s tests could be creating trade requests in the shared
+database at the exact moment `trade.test.ts`'s reviewer-visibility test ran
+its unscoped `find({})` query (a reviewer sees *all* trades) — so it
+occasionally counted trades from a completely different, concurrently-running
+test file.
+
+**Fix:** Set `fileParallelism: false` in `server/vitest.config.ts`, so test
+files run one at a time against the shared database.
+
+**Prevention:** Any assertion on an *unscoped* query ("all documents in this
+collection") is unsafe against shared state run in parallel — either give
+each test file its own isolated database/collection namespace, or run
+files sequentially when they share state. For this project's size, running
+sequentially was the simpler, more honest fix.
+
+### Interview questions
+
+1. **Why does `changeTradeStatus` check "is this transition valid" before
+   "is this requester allowed to do it"?** — Order matters for correct error
+   codes: an invalid transition is a `409` (bad request regardless of who's
+   asking); an unauthorized valid transition is `403`. Checking validity
+   first also means we never leak "you'd be allowed to do this, but the
+   transition itself doesn't exist."
+2. **Why is `StatusHistory` never updated or deleted, only created?** — It's
+   an audit trail; its value comes entirely from being an immutable,
+   append-only record of what actually happened, in order.
+3. **Why did parallel test files cause a previously-passing test to
+   fail after a new file was added — and why not before?** — All test files
+   share one in-memory database; an unscoped query run in a race with
+   concurrent test files created by an unrelated file can pick up their
+   data. It didn't happen before because there was no test creating
+   competing data at the exact right moment — an unlucky-then-lucky timing
+   window, which is exactly what makes shared-state races so easy to miss
+   until they aren't.
+
+### What I should remember
+
+- Encode business rules ("who can do what, from what state") as a data
+  table you can read top-to-bottom, not nested conditionals.
+- Client-side copies of authorization rules are for UX prediction only —
+  write a comment saying so, right next to the code, so nobody mistakes it
+  for enforcement later.
+- Validate *what* before *who* — check the action itself is legal before
+  checking whether this particular requester may perform it.
+- Shared test state (one DB for the whole suite) plus parallel test files is
+  a recipe for flaky, hard-to-reproduce failures — decide test isolation
+  strategy deliberately, not by accident.
+
+---
+
+### Phase 4 review
+
+**TOP 5 THINGS TO REMEMBER**
+1. Model a workflow as a transition table (current state → allowed next
+   states → allowed roles), not scattered conditionals.
+2. Check "is this transition valid" before "is this requester allowed" —
+   different failure modes deserve different status codes (409 vs 403).
+3. An audit trail (`StatusHistory`) should only ever be appended to, never
+   mutated — that's what makes it trustworthy.
+4. A client-side permission mirror controls what's shown, never what's
+   allowed — the server re-checks everything, always.
+5. Shared database state across parallel test files can produce
+   intermittent, confusing failures — prefer sequential test execution or
+   real per-file isolation.
+
+**TOP 5 INTERVIEW QUESTIONS**
+1. How would you design a status-transition system that's easy to extend
+   with a new status later?
+2. Why validate the transition itself before validating the requester's
+   permission to perform it?
+3. Why should an audit-trail collection never support updates or deletes?
+4. What's the actual security boundary when both client and server encode
+   the same authorization rule?
+5. Why can parallel test execution against shared state cause a previously
+   passing test to fail without that test itself changing?
+
+**TOP 3 DEVELOPMENT TIPS**
+1. Write the transition/permission table as an explicit, readable data
+   structure — it becomes both the implementation and the documentation.
+2. When mirroring a backend rule on the frontend for UX, comment clearly
+   that it's a prediction, not enforcement — future-you (or a teammate)
+   should never mistake it for the real check.
+3. Decide test isolation strategy (shared DB + sequential, or per-file
+   isolated DB) deliberately as the test suite grows, not after the first
+   flaky failure.
+
+**TOP 3 COMMON MISTAKES**
+1. Encoding a workflow as deeply nested `if/else` instead of a lookup table.
+2. Trusting a frontend permission check as if it were the real enforcement.
+3. Letting integration tests race against shared, unscoped database state
+   without either isolation or sequential execution.
+
+**MINI CODING EXERCISE**
+Add a `Rejected → Draft` transition (allowing the owner to revise and
+resubmit a rejected request) to both `TRANSITIONS` tables, plus a test
+confirming the owner — and only the owner — can perform it.
+
+---
+
+## Phase 5 — Analytics
+
+### What we built
+
+- `services/analytics.service.ts` — `getAnalyticsSummary` runs **one**
+  MongoDB aggregation with `$facet` to compute three independent results
+  from the same filtered set of documents in a single round trip: a total
+  count, a count grouped by status, and the 5 most recent requests.
+- `GET /api/analytics/summary` — reuses the same visibility rule as the
+  trade list (`canSeeAllTrades`): a plain user's dashboard reflects only
+  their own requests; a reviewer/admin sees totals across everyone.
+- `pages/Dashboard.tsx` — replaced the Phase 1 placeholder with real stat
+  cards (total + one per status) and a "recent requests" list linking into
+  the details page.
+- 5 new integration tests (auth requirement, per-role scoping, counts
+  reacting to a status change, zero-state) and 2 new Dashboard component
+  tests (populated state, empty state).
+
+### Concepts learned
+
+**`$facet`: one query, several derived views.** Without `$facet`, getting a
+total count, a status breakdown, and a recent list would mean three
+separate queries (`countDocuments`, an `aggregate` with `$group`, and a
+`find().sort().limit()`) — three round trips to MongoDB for what's
+conceptually one "give me the dashboard data" request. `$facet` runs
+multiple sub-pipelines against the *same* `$match`ed input document set in
+a single aggregation call, so all three shapes come back together.
+
+**Derived data vs. stored data.** Nothing about "total requests" or "counts
+by status" is stored anywhere — it's *computed* from the same
+`TradeRequest` collection the rest of the app already writes to, on every
+request. This avoids an entire category of bugs (a stored counter drifting
+out of sync with reality) at the cost of a slightly heavier read — an
+entirely reasonable tradeoff at this data scale, and the same compound
+indexes from Phase 2 (`{ createdBy, createdAt }`, `{ status, createdAt }`)
+still help the `$match` stage here.
+
+**Consistent authorization across features.** The analytics endpoint
+reuses `canSeeAllTrades` from `trade.service.ts` instead of re-implementing
+"who can see what" — the *same* rule that scopes the trade list also scopes
+the dashboard, so there's no risk of the two disagreeing about what a plain
+user is allowed to see in aggregate versus in the list.
+
+### Important code
+
+```ts
+// server/src/services/analytics.service.ts — three views, one round trip
+const [result] = await TradeRequest.aggregate([
+  { $match: matchStage },
+  {
+    $facet: {
+      totalCount: [{ $count: 'count' }],
+      byStatus: [{ $group: { _id: '$status', count: { $sum: 1 } } }],
+      recent: [{ $sort: { createdAt: -1 } }, { $limit: 5 }, { $project: { /* ... */ } }],
+    },
+  },
+]);
+```
+
+### Important commands
+
+```bash
+curl http://localhost:4000/api/analytics/summary -H "Authorization: Bearer <token>"
+```
+
+### Problems solved
+
+No new bugs this phase — the aggregation pipeline worked as designed on the
+first pass, which is itself worth noting: building the `$facet` query
+incrementally (first `$match` + `totalCount` alone, verified against a known
+seed, then adding `byStatus`, then `recent`) rather than writing the whole
+pipeline blind made it easy to be confident about the final shape.
+
+### Interview questions
+
+1. **Why use `$facet` instead of three separate queries?** — One round trip
+   to the database instead of three, and all three results are guaranteed
+   to reflect the exact same snapshot of data (no risk of a write landing
+   between separate queries and making the count and the list disagree).
+2. **Why doesn't this project store a running total instead of computing it
+   on every dashboard load?** — A computed value can never drift from
+   reality; a cached/stored counter can, if any write path forgets to update
+   it. At this data scale, computing it fresh is cheap and correct.
+3. **Why does `getAnalyticsSummary` call the same `canSeeAllTrades` helper
+   as the trade list, instead of writing its own role check?** — Consistency:
+   one function is the single source of truth for "who can see all trades
+   vs. just their own," used everywhere that distinction matters.
+
+### What I should remember
+
+- `$facet` is the right tool when you need several *different shapes* of
+  derived data from the same filtered document set in one request.
+- Prefer computing derived/aggregate data over storing and incrementally
+  maintaining it, unless the computation becomes a measured performance
+  problem — premature caching invites drift bugs for no proven benefit.
+- Reuse authorization helpers across features instead of re-deriving the
+  same rule in more than one place.
+
+---
+
+### Phase 5 review
+
+**TOP 5 THINGS TO REMEMBER**
+1. `$facet` computes multiple derived views from one filtered pipeline in a
+   single database round trip.
+2. Prefer deriving aggregate data on read over maintaining a stored counter.
+3. Reuse the same authorization helper everywhere a rule applies — don't
+   let two endpoints quietly diverge on "who can see what."
+4. Build aggregation pipelines incrementally, verifying each stage against
+   known data before adding the next.
+5. The same compound indexes that serve a list endpoint's queries typically
+   also serve that same data's aggregations.
+
+**TOP 5 INTERVIEW QUESTIONS**
+1. What problem does `$facet` solve versus running separate queries?
+2. When would you choose a stored/cached counter over computing a value on
+   every read?
+3. What's the risk of a stored aggregate value that isn't kept in sync?
+4. Why reuse the same `canSeeAllTrades` helper for both the trade list and
+   the analytics endpoint?
+5. How would you test that an aggregation pipeline is using an index rather
+   than a full collection scan?
+
+**TOP 3 DEVELOPMENT TIPS**
+1. Build a `$facet` pipeline one sub-pipeline at a time against known seed
+   data, rather than writing the whole thing and debugging blind.
+2. Give derived/read-only endpoints the same authorization scoping as the
+   underlying data they summarize — don't let a "just for the dashboard"
+   endpoint quietly skip a rule the rest of the API enforces.
+3. Keep the response shape typed end-to-end (server interface → client
+   type) so a field rename doesn't silently break the UI.
+
+**TOP 3 COMMON MISTAKES**
+1. Running N separate queries for a dashboard when one `$facet` aggregation
+   would return everything consistently in one round trip.
+2. Storing and incrementally maintaining a counter "for performance" before
+   there's any evidence computing it fresh is actually too slow.
+3. Re-implementing an authorization rule per endpoint instead of extracting
+   and reusing it.
+
+**MINI CODING EXERCISE**
+Add an `averageAmount` field to the analytics summary using `$avg` inside
+the existing `$facet`, and surface it as a new stat card on the dashboard.
+
+---
+
+## Phase 6 — Testing (Playwright E2E)
+
+### What we built
+
+Unit, integration, and component tests already existed from every prior
+phase (37 server tests, 20 client tests). Phase 6 adds the top of the test
+pyramid: a Playwright end-to-end suite driving the real, running app
+through a real browser.
+
+- `e2e/playwright.config.ts` — starts two real servers before the suite
+  runs (`webServer`, an array): the compiled-free API server via
+  `tsx src/tests/e2eServer.ts` against a real (in-memory) MongoDB, and the
+  actual Vite dev server the app ships with — no mocking anywhere in this
+  layer.
+- `server/src/tests/e2eServer.ts` — boots `mongodb-memory-server` on a
+  **pinned** port (unlike the Vitest suite's random port) specifically so
+  a separate test-fixture helper can connect to the same database directly.
+- `e2e/utils/db.ts` — a deliberate, commented "test-only backdoor":
+  connects to that pinned MongoDB directly to promote a user to `reviewer`,
+  since there's intentionally no UI/API for that (role assignment is an
+  admin/ops concern per Phase 4).
+- `e2e/pages/*.ts` — Page Object Model classes (`LoginPage`, `RegisterPage`,
+  `DashboardPage`, `TradeListPage`, `TradeFormPage`, `TradeDetailsPage`)
+  wrapping selectors and actions, so the actual spec files read like a
+  script of user behavior, not a pile of raw locators.
+- `e2e/tests/auth.spec.ts`, `trades.spec.ts`, `permissions.spec.ts` — the 7
+  required scenarios: register/login, create, view, edit, search/filter,
+  a reviewer moving a request through the full review workflow, and an
+  unauthorized stranger being blocked from another user's request.
+
+### Concepts learned
+
+**E2E tests exercise the real system, not a simulation of it.** Every
+layer built in Phases 0–5 — Express routes, Mongoose queries, React
+components, TanStack Query, real HTTP over a real network stack — runs for
+real here. Nothing is mocked. That's what makes E2E tests valuable (they
+catch integration bugs unit/component tests structurally cannot see) and
+also what makes them slow and comparatively fragile — hence "a few, for
+the critical paths," not "test everything this way."
+
+**Debugging training, for real this time.** Two genuine bugs surfaced
+while building this suite, both the same root cause pattern — see below.
+Both were found by *not* trusting an environment-noise explanation and
+instead reproducing the failure in isolation with explicit logging until
+the actual mechanism was visible.
+
+**A DB-fixture backdoor is a legitimate, common E2E technique.** Some test
+setup (like "this user is a reviewer") intentionally has no product-facing
+path to create it — that's a *feature* of the RBAC design (Phase 4), not a
+testing gap. `e2e/utils/db.ts` connects directly to the same database the
+app under test uses, does the one privileged write the UI will never
+expose, and is clearly commented as test-only infrastructure — never
+something the app itself would do.
+
+### Important code
+
+```ts
+// server/src/app.ts — the real bug this phase's debugging found
+app.use(helmet({ hsts: env.NODE_ENV === 'production' }));
+```
+
+```ts
+// e2e/tests/permissions.spec.ts — the other real bug this phase found:
+// always wait for an async client-side navigation before trusting page.url()
+await new TradeFormPage(page).createTrade({ /* ... */ });
+await expect(page).toHaveURL(/\/trades\/[a-f0-9]+$/);   // <- was missing
+const tradeUrl = page.url();                              // now reliably correct
+```
+
+### Important commands
+
+```bash
+npx playwright test --config e2e/playwright.config.ts        # run the whole E2E suite
+npx playwright test --config e2e/playwright.config.ts e2e/tests/auth.spec.ts   # one file
+npx playwright show-trace e2e/test-results/<test-dir>/trace.zip                # inspect a failure
+```
+
+### Problems solved
+
+**Bug 1 — Root cause turned out NOT to be the environment.** Two E2E tests
+consistently timed out or failed with confusing symptoms: a `.form-error`
+banner that "wasn't there," a `getByLabel('Comment (optional)')` that
+never appeared, `browserContext.close()` hanging past a 60-second timeout.
+The terminal was flooded the entire time with Chromium background-service
+SSL handshake failures (`net::ERR_CONNECTION_RESET` against random ports),
+which was an extremely convincing red herring.
+
+**What I thought caused it (hint given first, three separate times as the
+investigation deepened):** *Hint 1: what response header does this server
+send on every single request, even in development, that specifically
+instructs a browser to remember "always use HTTPS for this origin"?*
+*Hint 2 (after fixing that and the failure persisted): standalone
+reproduction scripts of the exact same register→navigate flow worked
+perfectly every time — so what's structurally different between those
+scripts and the actual failing test file?* *Hint 3: look at what the page
+snapshot in the failure report actually shows, not what you assume it
+shows.*
+
+**Root cause (two distinct, stacked issues, found in this order):**
+1. `helmet()` sends `Strict-Transport-Security` by default, even when the
+   server is only ever reached over plain HTTP in development/test. A
+   browser that receives this header remembers "HTTPS-only" for that
+   origin and silently retries background/prefetch requests over HTTPS —
+   which fail instantly against a server that doesn't speak TLS — for as
+   long as the policy is cached. This was a real bug worth fixing on its
+   own merits, not just for the tests.
+2. After fixing that, failures continued with a *different* symptom —
+   `page.url()` captured right after `createTrade()` sometimes still
+   pointed at `/trades/new` instead of the new trade's details page. The
+   test never `await`ed the *client-side* navigation that follows a
+   successful create (`navigate(`/trades/${id}`)` inside a React event
+   handler, asynchronous, not tied to `page.goto()`'s own load event) —
+   so `page.url()` could run before that navigation had actually happened.
+   The `.form-error` and `getByLabel('Comment...')` failures were entirely
+   downstream of a wrong URL, not "the app is confused" — the app was
+   behaving correctly the whole time.
+
+**Fix:** `helmet({ hsts: env.NODE_ENV === 'production' })`, plus adding
+`await expect(page).toHaveURL(...)` after every action that triggers an
+async client-side navigation, before ever reading `page.url()` or issuing
+the next `page.goto()`.
+
+**Prevention:** In Playwright (or any browser-automation) tests, never
+assume an action "must have finished" just because the `await` on the
+*trigger* (a click, a form fill) resolved — a click resolving only means
+the click event fired, not that whatever it kicked off asynchronously
+(an API call, a client-side route change) has completed. Always assert on
+the *observable result* (a URL, a visible element) before depending on it.
+And when several failures share one visible symptom, verify the *actual*
+mechanism with a minimal, isolated reproduction before trusting an
+environmental explanation — however convincing the surrounding noise looks.
+
+### Interview questions
+
+1. **Why is `Strict-Transport-Security` dangerous to send in development,
+   even though it's a real security best practice in production?** —
+   Browsers cache HSTS policies per-origin; a dev server that's plain HTTP
+   but sends HSTS teaches the browser to distrust plain HTTP for that
+   origin going forward, causing confusing, silent failures on background/
+   prefetch requests for as long as the policy is remembered.
+2. **Why did `page.url()` sometimes return a stale value right after a
+   button click that triggers navigation?** — The click handler resolving
+   only means the click event was dispatched; any asynchronous work it
+   kicks off (an API call, then a client-side `navigate()` call) hasn't
+   necessarily completed yet. `page.url()` reads whatever the current URL
+   is *at that instant*, not "the URL once everything settles."
+3. **What is a "test-only backdoor," and why is `e2e/utils/db.ts` an
+   acceptable one rather than a testing anti-pattern?** — It's test
+   infrastructure that bypasses the product surface to set up a fixture
+   the UI/API deliberately doesn't expose (promoting a user's role). It's
+   acceptable because it's clearly isolated (its own file, heavily
+   commented), never imported by application code, and sets up state
+   rather than replacing an assertion — the actual test still exercises
+   the real app through the real UI.
+
+### What I should remember
+
+- Always wait for the *observable effect* of an action (a URL, visible
+  text) before trusting that the action's async side effects are done —
+  never assume a resolved `await` on a click means everything it triggered
+  has finished.
+- Security headers like HSTS are environment-sensitive — gate them on
+  `NODE_ENV`, never send them unconditionally in a dev/test server.
+- When debugging, don't stop investigating just because you found *an*
+  explanation that fits the symptoms — verify it actually eliminates the
+  failure before moving on; a second, unrelated bug can hide behind noisy
+  evidence that all seems to point one direction.
+- A deliberate, well-commented test-only DB backdoor is fine for fixture
+  setup the product intentionally doesn't expose — keep it isolated and
+  obviously test-only.
+
+---
+
+### Phase 6 review
+
+**TOP 5 THINGS TO REMEMBER**
+1. E2E tests run the real stack end-to-end — valuable for catching
+   integration bugs, but slow/fragile, so reserve them for critical paths.
+2. Never send `Strict-Transport-Security` outside production — it's cached
+   by the browser and breaks plain-HTTP dev/test environments silently.
+3. A resolved `await` on a UI action means the action fired, not that its
+   async side effects (API calls, client-side navigation) are done —
+   always assert on the observable result before depending on it.
+4. Page Object Model classes keep spec files readable as "what a user
+   does," with selectors and low-level actions isolated in one place.
+5. A clearly-commented, isolated test-only DB backdoor is legitimate for
+   fixture setup the product deliberately doesn't expose via its own UI/API.
+
+**TOP 5 INTERVIEW QUESTIONS**
+1. Unit vs. integration vs. E2E — what does each layer actually verify,
+   and what can only E2E catch?
+2. Why can `Strict-Transport-Security` cause confusing bugs in a dev
+   environment specifically?
+3. Why must you wait for an observable result instead of trusting that a
+   resolved `await` on a click means its side effects finished?
+4. What is the Page Object Model, and what problem does it solve?
+5. When is a "test-only backdoor" (bypassing the UI/API for fixture setup)
+   acceptable, and when does it become an anti-pattern?
+
+**TOP 3 DEVELOPMENT TIPS**
+1. Gate every environment-sensitive security header (HSTS, secure cookies)
+   on `NODE_ENV`, and verify the gate actually works in dev, not just prod.
+2. In E2E tests, assert on the *result* (URL, visible text) of every action
+   that triggers async work, immediately after that action — don't chain
+   multiple un-asserted steps and hope timing works out.
+3. When several failures share a noisy, plausible-looking cause, still
+   verify it with an isolated minimal reproduction before accepting it —
+   don't let convincing background noise become confirmation bias.
+
+**TOP 3 COMMON MISTAKES**
+1. Sending production-only security headers unconditionally, breaking
+   local development in subtle, hard-to-diagnose ways.
+2. Capturing `page.url()` or otherwise depending on navigation state
+   immediately after a triggering action, without waiting for the
+   navigation to actually complete.
+3. Accepting the first plausible-looking explanation for a flaky test
+   without verifying it actually fixes the failure.
+
+**MINI CODING EXERCISE**
+Add an 8th E2E scenario: a `Rejected` trade's owner can see the rejection
+reason (the reviewer's comment) directly on the details page, using the
+`StatusHistoryList` component's rendered output.
+
+---
+
+## Phase 7 — Reliability
+
+### What we built
+
+Most of this phase's checklist (structured logging, centralized error
+handling, request timing, health checks, correlation IDs) already existed
+from Phase 0 — `pino`/`pino-http`, `errorHandler.ts`, `/api/health`. What
+was genuinely missing:
+
+- **Graceful shutdown** (`server/src/index.ts`): on `SIGTERM`/`SIGINT`,
+  stop accepting new connections, let in-flight requests finish
+  (`server.close()`), disconnect MongoDB, then exit — with a 10-second
+  force-exit timer as a backstop if something hangs.
+- **Process-level safety nets**: `uncaughtException` and
+  `unhandledRejection` handlers that log the error and exit, rather than
+  leaving the process running in an unknown, untested state.
+- **Correlation ID on error responses**: `errorHandler.ts` now includes
+  `requestId` (pino-http's per-request `req.id`, already echoed on the
+  `x-request-id` response header) directly in the JSON error body — so a
+  user reporting "I got error X" hands over one id that maps to an exact
+  server log line, no timestamp-matching required.
+
+### Concepts learned
+
+**Graceful shutdown matters most exactly when you'd least expect to test
+it.** Every deploy, restart, or container reschedule sends `SIGTERM`
+first (`SIGKILL` only after a grace period). Without handling it, every
+single deploy could sever in-flight requests mid-response — invisible in
+local development (you rarely `Ctrl+C` mid-request), but a real, repeated
+source of dropped requests in production. This is exactly the kind of gap
+that "works on my machine" and then quietly costs a percentage of
+requests at every deploy in a real system — Docker (Phase 8) makes this
+concrete, since `docker stop` sends `SIGTERM` too.
+
+**A crash you didn't anticipate is not a crash you should try to survive.**
+`uncaughtException`/`unhandledRejection` don't attempt to keep the process
+alive — they log and exit. Trying to "recover" from a truly unexpected
+error risks continuing in a corrupted state (a half-updated in-memory
+value, a connection in a bad state) that's worse than a clean restart. Let
+the orchestrator's restart policy do its job.
+
+**A correlation ID closes the loop between "user reports a problem" and
+"engineer finds the log line."** Structured logs are only searchable if
+you have *something* to search by — `x-request-id`/`requestId` is that
+handle, generated once per request and threaded through the log entry,
+the response header, and now the error body itself.
+
+### Important code
+
+```ts
+// server/src/index.ts — the shutdown sequence a container orchestrator expects
+server.close(async (err) => {
+  await disconnectDB();
+  process.exit(err ? 1 : 0);
+});
+```
+
+```ts
+// server/src/middleware/errorHandler.ts — one id, three places to find it
+body.error.requestId = req.id ? String(req.id) : undefined; // in the response body
+// ...also already on the x-request-id response header, and in every pino log line
+```
+
+### Important commands
+
+```bash
+# manually verify shutdown behavior
+node dist/index.js &
+kill -TERM $!   # should log "Shutting down gracefully" then "Shutdown complete" and exit 0
+```
+
+### Problems solved
+
+No new bugs this phase — everything was additive, and each piece
+(shutdown, safety nets, requestId) was verified directly: a manual SIGTERM
+test confirmed clean shutdown and exit code 0, and a server test asserts
+`res.body.error.requestId` matches the `x-request-id` response header.
+
+### Interview questions
+
+1. **Why does a container orchestrator send `SIGTERM` before `SIGKILL`,
+   and what should an app do in that window?** — `SIGTERM` is a request to
+   shut down cleanly; the app should stop accepting new work, finish
+   in-flight requests, release resources (DB connections), then exit on
+   its own — `SIGKILL` (unavoidable, un-catchable) is the orchestrator's
+   fallback if the app doesn't exit in time.
+2. **Why do `uncaughtException`/`unhandledRejection` handlers exit the
+   process instead of trying to keep it running?** — An error the app
+   didn't anticipate means its internal state is now unknown; continuing
+   risks operating on corrupted state, which is worse than a clean,
+   supervised restart.
+3. **What problem does a correlation/request ID solve that structured
+   logging alone doesn't?** — Structured logs are searchable, but only if
+   you know what to search *for*; a request ID surfaced to the client
+   (response header, error body) gives a direct handle a user can report
+   back, connecting "what the user saw" to "the exact log line" instantly.
+
+### What I should remember
+
+- `server.close()` stops accepting *new* connections but waits for
+  in-flight ones — that's what makes shutdown "graceful" rather than an
+  abrupt cutoff.
+- Always pair a graceful-shutdown attempt with a force-exit timer — a hung
+  cleanup step (a stuck DB disconnect) shouldn't block shutdown forever.
+- `uncaughtException`/`unhandledRejection` are a last-resort net for bugs,
+  not a substitute for `try/catch` or the `errorHandler` middleware —
+  reaching them means something wasn't handled where it should have been.
+
+---
+
+### Phase 7 review
+
+**TOP 5 THINGS TO REMEMBER**
+1. Handle `SIGTERM` to shut down gracefully — stop new connections, finish
+   in-flight ones, release resources, then exit.
+2. Always back a graceful shutdown with a force-exit timer, in case
+   cleanup itself hangs.
+3. `uncaughtException`/`unhandledRejection` should log and exit — never
+   try to keep running after state becomes unknown.
+4. A request/correlation ID belongs in three places: the log line, the
+   response header, and (for errors) the response body itself.
+5. Health checks should reflect real dependency health (DB connectivity),
+   not just "the process is alive."
+
+**TOP 5 INTERVIEW QUESTIONS**
+1. What's the difference between SIGTERM and SIGKILL, and why does it matter?
+2. Why exit on an uncaught exception instead of trying to recover?
+3. What does `server.close()` actually do, and what does it wait for?
+4. Why include a request ID in an error response body, not just server logs?
+5. What's the difference between a liveness check and a readiness check?
+   (Bonus: this project's `/api/health` currently conflates them — explain
+   the tradeoff.)
+
+**TOP 3 DEVELOPMENT TIPS**
+1. Test graceful shutdown manually at least once — `kill -TERM $(pid)` and
+   watch the logs — don't assume it works just because it compiles.
+2. Always pair a cleanup sequence with a timeout backstop.
+3. Thread one correlation ID through logs, response headers, and error
+   bodies from the very first request-logging middleware — retrofitting
+   it later means touching every layer again.
+
+**TOP 3 COMMON MISTAKES**
+1. Never handling SIGTERM, so every deploy silently drops in-flight requests.
+2. Trying to recover from an uncaught exception instead of exiting cleanly.
+3. Building structured logs without a correlation ID, making "find the log
+   line for this user's report" far harder than it needs to be.
+
+**MINI CODING EXERCISE**
+Split `/api/health` into `/api/health/live` (process is running — always
+200) and `/api/health/ready` (dependencies like MongoDB are reachable —
+what today's single `/api/health` does), matching the liveness/readiness
+distinction Kubernetes expects.
+
+---
+
+## Phase 8 — Docker
+
+### What we built
+
+- `server/Dockerfile`, `client/Dockerfile` — multi-stage builds. Both use
+  the **repo root** as their build context (not `./server` or `./client`),
+  because this is an npm workspace: compiling needs the shared root
+  `package-lock.json`, which doesn't exist inside either subdirectory.
+  - **Build stage**: full workspace install (`npm ci` at the root, with
+    every workspace's `package.json` present so the lockfile matches),
+    then compile just that one workspace (`npm run build --workspace ...`).
+  - **Runtime stage**: a completely standalone `npm install --omit=dev`
+    using *only* that service's own `package.json` — no workspace
+    entanglement, no unrelated deps (the server image never contains
+    React; the client image never contains Express) — then copy in just
+    the compiled output. The client's runtime stage doesn't even need
+    Node.js: `nginx:alpine` serves the static build directly.
+- `client/nginx.conf` — SPA fallback (`try_files ... /index.html`) so a
+  direct visit or refresh on a client-side route like `/trades/123` doesn't
+  404 against nginx, which only knows about real files.
+- `docker-compose.yml` — three services (`mongo`, `server`, `client`) on
+  one Docker network, talking to each other **by service name**
+  (`mongodb://mongo:27017/...`) rather than `localhost`. `mongo` has a
+  real healthcheck; `server` waits for it (`depends_on: condition:
+  service_healthy`) instead of just "container started" (which doesn't
+  mean "ready to accept connections").
+- `.dockerignore` — keeps `node_modules/`, `dist/`, `.git/`, and `.env*`
+  out of the build context.
+
+### Concepts learned
+
+**Build context vs. working directory.** A Dockerfile's `COPY` paths are
+relative to the *build context* (what you hand `docker build`), not to
+the Dockerfile's own location. Setting `context: .` (repo root) in
+`docker-compose.yml` while keeping `dockerfile: server/Dockerfile` lets
+the server's Dockerfile reach `client/package.json` and the root
+lockfile — necessary here specifically because of the npm workspace setup.
+
+**Two installs, two purposes.** The *build* stage's `npm ci` exists to
+compile TypeScript — it needs the full workspace, dev dependencies (typescript
+itself!), and a locked, reproducible dependency tree. The *runtime*
+stage's `npm install --omit=dev` exists only to give the compiled
+JavaScript its production dependencies at the smallest possible footprint
+— it doesn't need TypeScript, doesn't need the other workspace, and
+doesn't need to match a workspace-wide lockfile since it's just installing
+one package.json's dependencies fresh.
+
+**Service names ARE the DNS inside a Compose network.** `mongo`,
+`server`, and `client` can reach each other by those exact names
+(`mongo:27017`) because Docker Compose sets up an internal DNS resolving
+service names to container IPs on the shared network — this is why the
+containerized `MONGODB_URI` differs from the local-dev one
+(`mongodb://localhost:27017/...`).
+
+**A healthcheck changes what "depends_on" means.** Without a healthcheck,
+`depends_on: mongo` only waits for the mongo *container process* to start
+— not for MongoDB to actually be ready to accept connections, which can
+take a few seconds. `depends_on: { mongo: { condition: service_healthy }
+}` makes `server` wait for mongo's healthcheck to pass first, avoiding a
+race where the API tries to connect before the database is actually
+listening.
+
+### Important code
+
+```dockerfile
+# server/Dockerfile — build stage needs the whole workspace...
+FROM node:22-alpine AS build
+COPY package.json package-lock.json ./
+COPY server/package.json ./server/
+COPY client/package.json ./client/
+RUN npm ci
+RUN npm run build --workspace server
+
+# ...runtime stage needs none of that, just this one package.json
+FROM node:22-alpine AS runtime
+COPY server/package.json ./
+RUN npm install --omit=dev
+COPY --from=build /app/server/dist ./dist
+```
+
+```yaml
+# docker-compose.yml — service names as hostnames, and a real healthcheck
+server:
+  environment:
+    MONGODB_URI: mongodb://mongo:27017/tradeflow-lite   # not localhost
+  depends_on:
+    mongo:
+      condition: service_healthy   # not just "container started"
+```
+
+### Important commands
+
+```bash
+docker compose up --build       # build images (if needed) and start everything
+docker compose ps                # see running services
+docker compose logs -f server    # follow one service's logs
+docker compose down -v           # stop and remove containers + the mongo volume
+```
+
+### Problems solved
+
+**Bug (environment-specific, not a Dockerfile bug):** `docker compose
+build` failed inside `npm ci` with `npm error Exit handler never called!`,
+consistently, at almost exactly the same elapsed time on repeated attempts.
+
+**What I thought caused it (hint given first):** *Hint: a plain
+`wget https://registry.npmjs.org/` from inside a fresh, unmodified
+container — no Dockerfile involved at all — is a faster way to find out
+whether this is really about npm, or about something underneath it.*
+
+**Root cause:** This sandboxed development environment (not the Dockerfile,
+not the app) transparently intercepts outbound HTTPS with a TLS-terminating
+proxy (documented at `/root/.ccr/README.md`) that every tool must
+explicitly trust via a provided CA bundle. The host session has this trust
+already configured; a fresh Docker build container does not, so its HTTPS
+connections to the real npm registry fail TLS verification — visible with
+a plain `wget`/`node -e "https.get(...)"` test *before* even touching
+`npm ci`. In a normal environment (a real machine, most CI runners, most
+developers' laptops), this proxy doesn't exist and `npm ci` works
+unmodified — this was purely a constraint of verifying the build inside
+*this* sandbox.
+
+**Fix (for verification only, not shipped):** Temporarily mounted the
+sandbox's CA bundle into the build context and set
+`NODE_EXTRA_CA_CERTS` for the `npm ci`/`npm install` steps, confirmed both
+images build and the full stack (`docker compose up`) works end-to-end —
+register → dashboard → create trade, verified via a real headless
+browser against the running containers — then **reverted** that change
+before committing, since it's irrelevant (and would be misleading) for
+anyone actually running this Dockerfile on their own machine.
+
+**Prevention:** When a build step fails inside a sandboxed/CI environment
+and the error looks unrelated to your own code (a generic tool crash, not
+a clear application error), test the layer *underneath* your code first —
+here, "can this container reach the internet over HTTPS at all" — before
+assuming the Dockerfile itself is wrong.
+
+### Interview questions
+
+1. **Why is the Docker build context the repo root here, not `./server` or
+   `./client`?** — npm workspaces share one root lockfile; compiling one
+   workspace's TypeScript still needs `npm ci` to see the whole
+   workspace's `package.json` files to match the lockfile.
+2. **Why does the runtime stage run a completely separate, standalone
+   `npm install` instead of just copying `node_modules` from the build
+   stage?** — The build stage's `node_modules` reflects the *entire
+   workspace* (both client and server deps, plus every devDependency
+   needed to compile). A standalone install from just that service's
+   `package.json` produces a much smaller, correctly-scoped image with
+   only what the compiled JavaScript actually imports at runtime.
+3. **What does `depends_on: condition: service_healthy` add over plain
+   `depends_on: mongo`?** — Plain `depends_on` only waits for the
+   dependency's container process to *start*; `service_healthy` waits for
+   its healthcheck to actually pass, meaning the database is verified
+   ready to accept connections before the API container starts.
+
+### What I should remember
+
+- Docker `COPY` paths are relative to the build *context*, which you
+  choose independently of where the Dockerfile itself lives.
+- Separate "what's needed to build" from "what's needed to run" into
+  different stages — a slim runtime image is a direct result of that split.
+- `depends_on` alone only orders container *startup*, not readiness — pair
+  it with a real healthcheck when startup order actually matters.
+- When a sandboxed/CI environment's own constraints (proxies, restricted
+  egress) cause a failure, isolate and confirm that before assuming your
+  own code is at fault — and never leave environment-specific workarounds
+  in code meant to run elsewhere.
+
+---
+
+### Phase 8 review
+
+**TOP 5 THINGS TO REMEMBER**
+1. In an npm-workspace monorepo, the Docker build context needs to be the
+   repo root so `npm ci` can see the shared lockfile.
+2. Split Dockerfiles into a build stage (full toolchain) and a runtime
+   stage (only what's needed to run) — smaller, more secure final images.
+3. Compose services reach each other by service name over the internal
+   network, not `localhost`.
+4. `depends_on` orders startup; a healthcheck is what actually proves
+   readiness — use both together when order matters for correctness.
+5. Verify infrastructure failures against the layer underneath your own
+   code before assuming your code is the problem.
+
+**TOP 5 INTERVIEW QUESTIONS**
+1. What's the difference between a Docker image and a container?
+2. Why use multi-stage builds instead of one Dockerfile stage?
+3. How do containers on the same Docker Compose network communicate?
+4. What does a volume do, and why does the mongo service use one here?
+5. What's the difference between `depends_on` alone and `depends_on` with
+   a healthcheck condition?
+
+**TOP 3 DEVELOPMENT TIPS**
+1. Design the runtime stage's dependency install independently from the
+   build stage's — don't assume "copy node_modules forward" is the
+   simplest or smallest option.
+2. Give any service other containers must wait on a real healthcheck, not
+   just a fixed sleep or optimistic startup order.
+3. Keep `.dockerignore` in sync with `.gitignore`'s intent — anything that
+   shouldn't ship shouldn't be sent to the build context either.
+
+**TOP 3 COMMON MISTAKES**
+1. Using `localhost` instead of a service name inside a Compose network's
+   environment variables.
+2. Copying a full development `node_modules` into a production image
+   instead of doing a clean production-only install.
+3. Assuming `depends_on` guarantees a dependency is *ready*, not just that
+   its container has started.
+
+**MINI CODING EXERCISE**
+Add a `HEALTHCHECK` instruction to `server/Dockerfile` itself (curling
+`/api/health`), so `docker ps` reports the server container's health
+directly, independent of Compose's own healthcheck config.
+
+---
+
+## Phase 9 — CI/CD
+
+### What we built
+
+- `.github/workflows/ci.yml` — runs on every PR into `main` and every push
+  to `main`, with five jobs: `lint-and-typecheck`, `server-tests`,
+  `client-tests`, `build` (depends on lint passing first — no point
+  compiling code that doesn't even lint), and `e2e` (depends on `build`
+  passing). Each independent job (lint, server tests, client tests) runs
+  in parallel rather than one long serial job, so a lint failure and a
+  server test failure would both be visible immediately instead of one
+  hiding behind the other.
+- `concurrency` cancellation — pushing a new commit to an open PR cancels
+  that PR's still-running CI, instead of wasting runner time finishing a
+  run for code that's already been superseded.
+- Fixed a real portability bug found while writing this phase: **before**,
+  `e2e/playwright.config.ts` fell back to a hard-coded Chromium path
+  specific to *this development sandbox* whenever `PLAYWRIGHT_CHROMIUM_PATH`
+  wasn't set — which would have silently broken the E2E job on a real
+  GitHub Actions runner (no such path exists there). Fixed to only
+  override the browser path when explicitly asked to, letting Playwright
+  fall back to its own normal browser resolution everywhere else.
+
+### Concepts learned
+
+**A CI pipeline is a second, disinterested reviewer.** It runs the exact
+same commands a contributor could run locally (`npm run lint`, `npm run
+build`, ...) — but on every single PR, with no chance of "I forgot to run
+it" or "it worked on my machine." That's the entire value proposition: the
+same checks, guaranteed to actually happen, every time.
+
+**Parallel jobs vs. one long job.** Splitting lint/typecheck, server
+tests, and client tests into separate jobs means they run concurrently
+(faster feedback) and fail independently (a lint problem doesn't hide a
+test failure in the same log). `needs: [...]` expresses genuine
+dependencies — `build` needs code that at least lints; `e2e` needs code
+that actually builds — without forcing everything into one serial chain.
+
+**Environment-specific assumptions are exactly what portable code (and CI)
+protects against.** The Playwright config bug this phase found — a
+sandbox-specific path silently used as a "sensible default" — is a small,
+concrete example of the larger lesson from Phase 6's debugging: code that
+"just happens to work" because of an assumption true only in one
+environment is a bug waiting for a different environment (here: a real CI
+runner) to expose it.
+
+### Important code
+
+```yaml
+# .github/workflows/ci.yml — parallel jobs, explicit dependencies
+jobs:
+  lint-and-typecheck: { ... }
+  server-tests: { ... }        # runs in parallel with lint-and-typecheck
+  client-tests: { ... }        # runs in parallel with both of the above
+  build:
+    needs: [lint-and-typecheck]   # only build code that at least lints
+  e2e:
+    needs: [build]                 # only run E2E against code that builds
+```
+
+```ts
+// e2e/playwright.config.ts — the portability fix
+launchOptions: process.env.PLAYWRIGHT_CHROMIUM_PATH
+  ? { executablePath: process.env.PLAYWRIGHT_CHROMIUM_PATH }  // this sandbox only
+  : {},                                                          // everywhere else: Playwright's own default
+```
+
+### Important commands
+
+```bash
+# every command CI runs, runnable identically on a local machine
+npm ci
+npm run lint
+npm run typecheck
+npm run build --workspace server
+npm run build --workspace client
+npm run test --workspace server
+npm run test --workspace client
+npx playwright install --with-deps chromium   # CI only — real machines usually have this already
+npm run test:e2e
+```
+
+### Problems solved
+
+**Bug:** `e2e/playwright.config.ts` had
+`executablePath: process.env.PLAYWRIGHT_CHROMIUM_PATH ?? '/opt/pw-browsers/chromium'`
+— a fallback that would only ever be correct on this one development
+sandbox.
+
+**What I thought caused it (hint given first):** *Hint: this line was
+written to solve a specific, local problem (avoiding a slow browser
+download in one environment) — now imagine this exact config file running
+on a GitHub Actions runner instead. What's actually at that path there?*
+
+**Root cause:** The fallback path was written to make local E2E runs fast
+*in this sandbox specifically* (a pre-installed Chromium at a fixed,
+non-standard path), but it applied unconditionally — any environment
+without `PLAYWRIGHT_CHROMIUM_PATH` explicitly set would still try to
+launch a browser from that exact sandbox-only path, which doesn't exist on
+a real CI runner (or most developers' machines).
+
+**Fix:** Only set `executablePath` when `PLAYWRIGHT_CHROMIUM_PATH` is
+explicitly provided; otherwise pass an empty `launchOptions`, letting
+Playwright fall back to its own normal (correct, portable) browser
+resolution.
+
+**Prevention:** A "helpful default" that encodes one specific
+environment's quirk is a portability bug in waiting — prefer explicit
+opt-in (an env var that must be set) over a default that silently assumes
+a specific machine's layout.
+
+### Interview questions
+
+1. **Why split lint/typecheck, server tests, and client tests into
+   separate CI jobs instead of one long job running everything in
+   sequence?** — Parallel execution (faster feedback) and independent
+   failure visibility (a lint failure doesn't bury a test failure in the
+   same log, and vice versa).
+2. **What does `needs: [build]` on the E2E job express, and why not just
+   let every job run independently?** — A genuine dependency: there's no
+   point running E2E tests against code that doesn't even build. `needs`
+   makes that ordering explicit instead of hoping jobs happen to finish in
+   a useful order.
+3. **Why is a hard-coded fallback path tied to one specific development
+   environment a bug, even though "it works" in that environment?** — Because
+   the code will run in other environments (CI, teammates' machines) where
+   that assumption doesn't hold; "works here" isn't the same as "correct" —
+   the earlier Phase 6 HSTS bug is the same category of mistake in a
+   different layer.
+
+### What I should remember
+
+- CI should run the *exact same* commands a developer could run locally —
+  no CI-only logic that could itself hide a bug.
+- Split independent checks into separate jobs for parallelism and clearer
+  failure attribution; use `needs` only for genuine dependencies.
+- Treat "fallback to a value specific to my current environment" as a
+  smell — prefer an explicit opt-in over a default that assumes one
+  machine's setup.
+- `concurrency` + `cancel-in-progress` avoids wasting CI minutes on runs
+  that are already obsolete by the time they'd finish.
+
+---
+
+### Phase 9 review
+
+**TOP 5 THINGS TO REMEMBER**
+1. CI runs the same commands a contributor runs locally — its value is
+   guaranteeing they actually happen, every time, with no exceptions.
+2. Split independent checks into parallel jobs; use `needs` only for real
+   dependencies (build needs lint-clean code; E2E needs a working build).
+3. A hard-coded environment-specific fallback is a portability bug waiting
+   to be discovered by a *different* environment.
+4. `concurrency` + `cancel-in-progress` saves CI time on superseded runs.
+5. Keep flaky-prone layers (E2E) visible in CI without necessarily making
+   them a hard merge-blocking gate, per the test pyramid's tradeoffs.
+
+**TOP 5 INTERVIEW QUESTIONS**
+1. What is CI, and what problem does it actually solve?
+2. Why run lint/tests/build as separate parallel jobs instead of one script?
+3. What does a `needs:` dependency between jobs express?
+4. Why might a team choose not to make E2E tests a required, merge-blocking
+   check, even though they run on every PR?
+5. What's an example of an "environment-specific default" bug, and how do
+   you prevent that category of bug in general?
+
+**TOP 3 DEVELOPMENT TIPS**
+1. Write CI to call the exact same npm scripts a developer runs locally —
+   never CI-only logic that could hide what actually happens.
+2. Fail fast: put the cheapest, fastest checks (lint) as a dependency for
+   the more expensive ones (build, E2E) so slow jobs don't run against
+   code that was always going to fail lint anyway.
+3. Prefer explicit environment-variable opt-ins over defaults that assume
+   a specific machine's setup — write it once assuming it'll run somewhere
+   you've never seen.
+
+**TOP 3 COMMON MISTAKES**
+1. One giant CI job doing everything serially — slow feedback, and one
+   failure's log output buries every other check's result.
+2. Making a flaky, environment-sensitive check (E2E) a hard-blocking gate
+   before it's proven stable, training the team to routinely bypass CI.
+3. Hard-coding a path/value that only happens to be correct in the
+   environment you personally tested in.
+
+**MINI CODING EXERCISE**
+Add a `docker` job to `ci.yml` that runs `docker compose build` (no need
+to run the containers) — verifying the Dockerfiles themselves stay
+buildable as the codebase changes, not just that the app builds outside
+a container.
+
+---
+
+## Phase 10 — Optional AI feature (Ollama)
+
+### What we built
+
+An optional "Generate with AI" button on the trade request form. It calls
+a new `POST /api/ai/generate-description` endpoint, which asks a locally
+running [Ollama](https://ollama.com) model to draft a short trade-finance
+description from whatever fields are already filled in (title, customer,
+amount/currency, country, request type). If Ollama isn't installed or
+running, the endpoint fails predictably (`503 AI_UNAVAILABLE`) and the UI
+shows an inline notice instead of crashing or blocking the rest of the
+form — the entire feature is additive, never required.
+
+### Concepts learned
+
+- **Optional dependency, not a required one**: the app must fully work
+  with Ollama absent — no startup check, no required env var, no crash
+  path. `env.ts` gives `OLLAMA_BASE_URL`/`OLLAMA_MODEL` defaults so the
+  app boots identically whether or not Ollama exists on the machine.
+- **Timeouts on outbound calls**: any call to a service you don't control
+  (even a local one) needs a bounded wait — `AbortController` + `setTimeout`
+  here, so a hung Ollama process can't hang an API request indefinitely.
+  For a *connection refused* the wait is essentially instant (Node/the OS
+  reject unopened ports right away); the timeout budget exists for the
+  slower, less obvious failure modes (Ollama running but the wrong model,
+  or a machine so loaded a real generate call never finishes) — `fetch`
+  doesn't wait forever on those on its own.
+- **Translate the failure, don't leak it**: the raw fetch error (a
+  connection refused, a timeout, a bad status) never reaches the client —
+  the service catches every failure mode and re-throws one stable,
+  documented `AppError` (`503 AI_UNAVAILABLE`) so the frontend only ever
+  has to handle a single, predictable shape.
+- **Best-effort mutation, not a blocking dependency**: the client's
+  `useGenerateDescriptionMutation` has no `onSuccess` cache side effects
+  and no `retry` — it either fills a field or shows a small notice; it
+  never disables the rest of the form or the submit button.
+- **Sending exactly what the server expects**: a `useForm` default value
+  (`amount: 0`, `currency: ''`) is a valid *form* state but not
+  necessarily a valid *API payload* — a field that's still at its default
+  needs to be treated as "not provided," not passed through literally.
+
+### Important code
+
+`server/src/services/ai.service.ts` — builds the prompt, calls Ollama's
+`/api/generate` with `stream: false`, and converts every failure mode
+(network error, timeout, non-OK status, empty response) into one
+`AppError.serviceUnavailable('AI_UNAVAILABLE', ...)`:
+
+```ts
+export async function generateDescription(input: GenerateDescriptionInput): Promise<string> {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
+  try {
+    const res = await fetch(`${env.OLLAMA_BASE_URL}/api/generate`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ model: env.OLLAMA_MODEL, prompt: buildPrompt(input), stream: false }),
+      signal: controller.signal,
+    });
+    if (!res.ok) throw new Error(`Ollama responded with status ${res.status}`);
+    const data = (await res.json()) as { response: string };
+    const description = data.response?.trim();
+    if (!description) throw new Error('Ollama returned an empty response');
+    return description;
+  } catch (err) {
+    logger.warn({ err }, 'AI description generation unavailable');
+    throw AppError.serviceUnavailable('AI_UNAVAILABLE', '...');
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+```
+
+`client/src/components/TradeForm.tsx` — omits fields still at their form
+default before calling the mutation, so the payload matches what the
+server actually validates:
+
+```ts
+generateDescription.mutate({
+  title,
+  customerName: customerName || undefined,
+  amount: amount > 0 ? amount : undefined,
+  currency: currency || undefined,
+  country: country || undefined,
+  requestType,
+});
+```
+
+### Important commands
+
+```bash
+# Optional local setup — the app works fully without this
+ollama pull llama3.2
+ollama serve
+
+curl -X POST http://localhost:4000/api/ai/generate-description \
+  -H "Authorization: Bearer <token>" -H "Content-Type: application/json" \
+  -d '{"title":"Import shipment financing","country":"Germany","requestType":"Letter of Credit"}'
+```
+
+### Problems solved
+
+**The bug**: clicking "Generate with AI" on a freshly opened create-trade
+form (only the Title field filled in) returned a `422` — not the expected
+`503 AI_UNAVAILABLE` — and the inline notice read "Request data failed
+validation" instead of the intended "AI unavailable" message.
+
+*What I thought first*: that Ollama simply wasn't reachable in this
+environment (true) and the `503` path just hadn't been hit yet.
+
+*Hint*: the status code was `422`, not `503` — that number means the
+request never even reached the Ollama call. Where does a `422` come from
+in this codebase, and what does that imply about *when* the failure
+happened?
+
+*Root cause*: `getValues()` returns the form's actual current values,
+including untouched fields still at their `useForm` defaults —
+`amount: 0`, `currency: ''`, `country: ''`. The mutation payload passed
+those values through literally. Server-side, `generateDescriptionSchema`
+declares `amount: z.coerce.number().positive().optional()` — `optional()`
+allows `amount` to be *missing*, but `0` is present and fails `.positive()`.
+An untouched number field's "empty" state (`0`) and Zod's "not provided"
+concept (`undefined`) aren't the same thing, and nothing was reconciling
+them before the request left the browser.
+
+*The fix*: convert each default-ish value to `undefined` before building
+the mutation payload (`amount > 0 ? amount : undefined`, `currency ||
+undefined`, `country || undefined`) — see the code above.
+
+*How it was found*: caught during a real browser smoke test (registering,
+opening the create-trade form, filling only Title, clicking the button) —
+the actual response body's `error.code` was `VALIDATION_ERROR`/`422`,
+which pointed straight at Zod parsing rather than the Ollama call.
+
+*Prevention*: whenever a form library's "empty" default and an API
+schema's "optional" meaning might not line up (`0` vs. missing, `''` vs.
+missing), normalize explicitly at the boundary where the payload is
+built — don't assume `getValues()` is already shaped like a valid partial
+API request.
+
+### Interview questions
+
+1. Why does this endpoint return `503`, not `500`, when Ollama can't be
+   reached?
+2. Why translate every failure mode into one generic `AI_UNAVAILABLE`
+   error instead of surfacing the underlying network/timeout error to the
+   client?
+3. Why is a request timeout still worth adding for a *local* service call,
+   not just a remote one?
+4. What's the difference between a form field being "empty" and an API
+   field being "not provided," and why did that distinction matter here?
+
+### What I should remember
+
+- Treat any optional integration as something the app must work *without*
+  by default — no required config, no startup dependency, one clearly
+  documented failure path.
+- Always put a timeout on an outbound call to a process you don't fully
+  control, even one running on `localhost`.
+- A form's default values are a valid UI state but not automatically a
+  valid API payload — reconcile the two explicitly where the request is
+  built, not by hoping they already match.
+- A real browser smoke test found a bug two full test suites (Vitest unit/
+  integration on both sides) didn't, because both suites' AI tests
+  supplied deliberately "clean" payloads — a reminder that unit tests are
+  only as good as the inputs they choose to exercise.
+
+---
+
+### Phase 10 review
+
+**TOP 5 THINGS TO REMEMBER**
+1. An optional feature must leave the app in an identical, fully working
+   state whether or not the optional dependency exists.
+2. Convert every raw failure from an external call into one stable,
+   documented error shape — never let a raw network/timeout error reach
+   the client.
+3. Bound every outbound network call with a timeout, even to `localhost`.
+4. A UI form's "empty" default and an API schema's "optional" field are
+   two different concepts — reconcile them explicitly when building a
+   request payload.
+5. Manual browser testing catches a class of bug (real, unfiltered user
+   input) that unit tests with hand-picked fixtures can miss entirely.
+
+**TOP 5 INTERVIEW QUESTIONS**
+1. How would you design a feature that depends on an optional local
+   service, so the app is unaffected when that service is absent?
+2. What's the tradeoff of catching every possible failure mode into one
+   generic error code, versus preserving more detail for the client?
+3. Why add a timeout to a call to a service running on the same machine?
+4. Describe a bug you found where two different systems' definitions of
+   "empty" or "optional" didn't match — how did you find it, and how did
+   you fix it?
+5. Why does this project cap the AI endpoint's request body validation
+   with `.optional()` fields rather than requiring the full trade schema?
+
+**TOP 3 DEVELOPMENT TIPS**
+1. Design optional integrations to fail into a known, handled state — not
+   as an afterthought once you notice they can fail.
+2. Keep an optional feature's mutation state fully separate from the
+   form's own submit state — a failed AI call should never block or taint
+   the rest of the form.
+3. Smoke-test a new feature in a real browser with realistic, imperfect
+   input (an empty field, a zero default) — not just the happy path a unit
+   test fixture assumes.
+
+**TOP 3 COMMON MISTAKES**
+1. Assuming a `useForm` default value is equivalent to "the user didn't
+   provide this" when building an API payload — it isn't, until you make
+   it so explicitly.
+2. Letting a third-party/local service's raw error reach the client
+   instead of normalizing it into the app's own error contract.
+3. Skipping a timeout on an outbound call because "it's just localhost" —
+   local services hang too.
+
+**MINI CODING EXERCISE**
+Add a small in-memory cache (keyed by the generated prompt string, a few
+minutes' TTL) in front of `generateDescription` so identical repeated
+requests (e.g. a user clicking "Generate with AI" twice without changing
+any fields) don't re-hit Ollama — and explain, in a comment, why this
+cache should live entirely in the service layer and never affect the
+route/controller's error-handling contract.
+
+---
+
+## Phase 11 — Portfolio Polish
+
+### What we built
+
+The final pass that turns a working app into something ready to show:
+interactive API documentation (`GET /api/docs`, Swagger UI, served from a
+hand-written OpenAPI spec), a destructive-but-safe demo seed script
+(`npm run seed --workspace server`) producing three role accounts and five
+trade requests spanning every workflow status, real browser screenshots
+captured with Playwright and embedded in the README, an expanded README
+(demo accounts, deployment guidance, known limitations, future
+improvements), and three new docs aimed squarely at interview prep:
+`docs/interview-demo-script.md` (a live-demo walkthrough), 
+`docs/final-fullstack-interview-prep.md` (50 quick-review questions across
+the whole stack), and `docs/cv-description.md` (resume/portfolio text).
+
+### Concepts learned
+
+- **A hand-written API spec is a legitimate choice, not just "the lazy
+  option"**: generating OpenAPI from Zod schemas keeps them in sync
+  automatically, but adds a dependency and a build step; for a project this
+  size, a hand-written spec reviewed alongside the code it documents is a
+  reasonable, explainable tradeoff — the "right" answer depends on scale,
+  not on always picking the more automated tool.
+- **A destructive script needs its own safety net**: the seed script always
+  wipes existing data (so it's reproducible), which means it needs an
+  explicit guard of its own (`NODE_ENV=production` refusal) rather than
+  relying on "nobody would run this against a real database by accident."
+- **Seed through the real service layer, not raw inserts**: calling
+  `registerUser`/`createTrade`/`changeTradeStatus` instead of
+  `Model.insertMany(...)` guarantees seeded data is exactly as valid as
+  data created through the actual app — password hashing, status-transition
+  rules, and audit-trail entries all happen for real, not as a shortcut
+  that could silently drift from what the app actually enforces.
+- **Screenshots as a byproduct of a real smoke test, not a separate task**:
+  the same Playwright browser session used to visually verify the app
+  works is the natural place to also capture the images a README needs —
+  no separate manual "open the app and take screenshots" step.
+
+### Important code
+
+`server/src/scripts/seed.ts` — the production guard, checked before any
+destructive operation runs:
+
+```ts
+if (env.NODE_ENV === 'production') {
+  throw new Error('Refusing to run the destructive seed script against NODE_ENV=production');
+}
+```
+
+`server/src/app.ts` — mounting interactive docs from a plain TypeScript
+object (no code generation step):
+
+```ts
+app.use('/api/docs', swaggerUi.serve, swaggerUi.setup(openApiSpec));
+```
+
+### Important commands
+
+```bash
+npm run seed --workspace server           # load demo data (refuses on NODE_ENV=production)
+curl -s http://localhost:4000/api/docs/   # confirm Swagger UI is served
+```
+
+### Problems solved
+
+No new bug this phase — everything here was building on already-verified
+foundations (the AI feature's payload bug from Phase 10 was the last one
+found). The closest thing to a snag: the first screenshot script tried to
+click a generic `table tbody tr` locator to open a trade's details page,
+which didn't reliably trigger React Router navigation because the actual
+clickable element was a `<Link>` around just the title text, not the whole
+row. Fixed by targeting `table tbody tr td a` directly — a small reminder
+that a screenshot/E2E script needs to interact with the actual clickable
+element, the same discipline as the real E2E suite.
+
+### Interview questions
+
+1. What's the tradeoff between a hand-written and a generated OpenAPI spec?
+2. Why does a seed script need its own safety checks, even in a project
+   that already has role-based access control?
+3. Why seed data through the same service functions the API uses, instead
+   of inserting documents directly into MongoDB?
+
+### What I should remember
+
+- "More automated" isn't automatically "more correct" — match the tooling
+  to the project's actual scale and how much drift-risk is worth trading
+  for it.
+- A script that's destructive by design (a seed script, a reset script)
+  needs a guard against running in the wrong environment; "developers will
+  be careful" isn't a control.
+- Reusing the real service layer for setup/fixture data (seeding, tests)
+  keeps that data trustworthy — it went through every validation and
+  business rule the app itself enforces.
+
+---
+
+### Phase 11 review — and project wrap-up
+
+**TOP 5 THINGS TO REMEMBER (this phase)**
+1. A hand-written OpenAPI spec is a legitimate, explainable choice at small
+   scale — generation isn't automatically "more correct."
+2. A destructive script (seed/reset) needs its own explicit safety guard,
+   independent of the app's normal authorization.
+3. Seed data through real service functions, not raw model inserts, so it's
+   exactly as valid as data the app itself would produce.
+4. A live smoke test is also the cheapest place to capture real screenshots
+   — don't treat it as a separate task.
+5. Documentation that's actually useful in an interview (a demo script, a
+   quick-review question set) is worth building deliberately, not left as
+   an afterthought.
+
+**TOP 5 INTERVIEW QUESTIONS (this phase)**
+1. Hand-written vs. generated API docs — what's the tradeoff, and when
+   would you choose differently?
+2. How do you make a destructive database script safe to keep in a repo?
+3. Why route seed/fixture data through the application's own service layer?
+4. What would you add before this project could be considered
+   production-ready (not just portfolio-ready)?
+5. Walk through this project's request lifecycle end to end, from a button
+   click to a database write and back.
+
+**TOP 3 DEVELOPMENT TIPS**
+1. Build interview-prep material (demo script, quick Q&A, CV text) as part
+   of finishing a project, not as a rushed afterthought the night before an
+   interview.
+2. Keep "known limitations" and "future improvements" sections honest and
+   specific — vague hand-waving is less convincing than a concrete, scoped
+   list.
+3. A destructive convenience script earns its place in a repo only if it's
+   also safe by construction, not just "documented as dangerous."
+
+**TOP 3 COMMON MISTAKES**
+1. Treating documentation/polish as optional busywork instead of part of
+   what makes a portfolio project actually land in an interview.
+2. Writing a seed/reset script without a production guard, "because I'll
+   remember not to run it there."
+3. Under-preparing for the predictable follow-up questions ("what would you
+   change for production?", "walk me through the request lifecycle") that
+   come up in nearly every technical interview.
+
+**MINI CODING EXERCISE**
+Add a `GET /api/trades/export` endpoint (CSV of the caller's visible trade
+requests) and decide, deliberately: does it belong in the existing
+`trade.controller.ts`/`trade.service.ts`, or does CSV formatting deserve
+its own small module? Justify the choice in a one-line comment.
+
+---
+
+## Project complete
+
+All 11 phases (0 through 11) are done: a full-stack trade-finance workflow
+app with authentication, RBAC, a real state-machine-driven review workflow,
+analytics, a 72-scenario test suite (42 server + 22 client + 8 E2E),
+production-reliability basics, Docker, CI/CD, an optional local-AI feature,
+interactive API docs, and interview-ready documentation. See the README for
+where to start, and `docs/interview-demo-script.md` for how to show it off.
+
+---
+
+## Post-launch addition — Nightly E2E with Allure reporting
+
+A small follow-up after the 11 phases: a second, scheduled workflow
+(`.github/workflows/nightly-e2e.yml`) runs the Playwright E2E suite every
+night with the `allure-playwright` reporter, generates an interactive
+Allure HTML report, and writes a markdown pass/fail digest straight into
+that run's GitHub Actions **Summary** tab.
+
+**Why a separate workflow, not folded into `ci.yml`**: the nightly run's
+job is different from the PR-gating `ci.yml` — it's about trend visibility
+over time, not fast per-PR feedback. Keeping it separate means the PR
+critical path never pays for Allure's extra reporter/report-generation
+overhead, and the two workflows can be tuned independently (a nightly run
+can afford to be slower and heavier).
+
+**The one non-obvious finding**: `allure-playwright`'s `resultsDir` option
+resolves relative to `process.cwd()` at the moment Playwright is invoked —
+*not* relative to `playwright.config.ts`'s own location, unlike the built-in
+`html` reporter's `outputFolder`. Since both the npm script and the CI job
+always invoke Playwright from the repo root, `resultsDir: 'e2e/allure-results'`
+is correct in practice, but it's a real gotcha if that assumption ever
+changes (e.g. someone runs Playwright from inside `e2e/`).
+
+**Why the report doesn't render directly inside the Summary tab**: GitHub
+Actions' Summary tab only renders a sanitized markdown/HTML subset — no
+JavaScript, so a full single-page app like Allure's HTML report can't be
+embedded live. The workaround used here: write a compact markdown digest
+(pass/fail counts, duration, failure list) into the Summary via
+`GITHUB_STEP_SUMMARY` for the at-a-glance view, and attach the full
+interactive report as a downloadable workflow artifact on the same run for
+anyone who needs to dig in.
+
+Commands: see `docs/commands-cheatsheet.md`'s "Nightly E2E + Allure
+reports" section.

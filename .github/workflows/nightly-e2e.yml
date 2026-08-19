@@ -1,0 +1,59 @@
+name: Nightly E2E (Allure)
+
+on:
+  schedule:
+    # 03:00 UTC every night — off-hours, after the day's PR traffic.
+    - cron: '0 3 * * *'
+  workflow_dispatch: {}
+
+concurrency:
+  group: nightly-e2e
+  cancel-in-progress: false
+
+jobs:
+  e2e-allure:
+    name: Playwright E2E (Allure)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+
+      - run: npm ci
+      - run: npx playwright install --with-deps chromium
+
+      - name: Run E2E suite with the Allure reporter
+        run: npm run test:e2e:allure
+        continue-on-error: true
+        id: e2e
+
+      - name: Generate Allure HTML report
+        if: always()
+        run: npm run allure:generate
+
+      # The Summary tab only renders markdown — it can't embed Allure's
+      # interactive HTML report directly — so this digest is what's
+      # actually visible on the run page without downloading anything.
+      - name: Write summary digest to the job run's Summary tab
+        if: always()
+        run: node .github/scripts/allure-summary.mjs e2e/allure-results
+
+      - name: Upload full Allure report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: allure-report
+          path: e2e/allure-report
+          retention-days: 14
+
+      - name: Fail the job if the E2E suite failed
+        if: steps.e2e.outcome == 'failure'
+        run: exit 1

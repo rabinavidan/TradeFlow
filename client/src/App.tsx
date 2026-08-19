@@ -1,41 +1,34 @@
-import { useEffect, useState } from 'react';
+import { Navigate, Route, Routes } from 'react-router-dom';
+import { ProtectedRoute } from './components/ProtectedRoute';
+import { Layout } from './components/Layout';
+import { Dashboard } from './pages/Dashboard';
+import { Login } from './pages/Login';
+import { Register } from './pages/Register';
+import { TradeList } from './pages/TradeList';
+import { CreateTrade } from './pages/CreateTrade';
+import { TradeDetails } from './pages/TradeDetails';
+import { EditTrade } from './pages/EditTrade';
+import { NotFound } from './pages/NotFound';
 
-interface HealthStatus {
-  status: string;
-  db: string;
-  timestamp: string;
-}
-
-const API_URL = import.meta.env.VITE_API_URL ?? 'http://localhost:4000/api';
-
-/**
- * Phase 0 placeholder: pings the backend /api/health endpoint to prove
- * the client and server are wired together. Replaced by React Router
- * pages in Phase 3.
- */
 function App() {
-  const [health, setHealth] = useState<HealthStatus | null>(null);
-  const [error, setError] = useState<string | null>(null);
-
-  useEffect(() => {
-    fetch(`${API_URL}/health`)
-      .then((res) => res.json() as Promise<HealthStatus>)
-      .then(setHealth)
-      .catch(() => setError('Could not reach the TradeFlow Lite API'));
-  }, []);
-
   return (
-    <main className="status-page">
-      <h1>TradeFlow Lite</h1>
-      <p>Full-stack trade-finance workflow demo.</p>
-      {error && <p className="status-error">{error}</p>}
-      {!error && !health && <p>Checking API status…</p>}
-      {health && (
-        <p className="status-ok">
-          API status: <strong>{health.status}</strong> · DB: <strong>{health.db}</strong>
-        </p>
-      )}
-    </main>
+    <Routes>
+      <Route path="/login" element={<Login />} />
+      <Route path="/register" element={<Register />} />
+
+      <Route element={<ProtectedRoute />}>
+        <Route element={<Layout />}>
+          <Route path="/" element={<Navigate to="/dashboard" replace />} />
+          <Route path="/dashboard" element={<Dashboard />} />
+          <Route path="/trades" element={<TradeList />} />
+          <Route path="/trades/new" element={<CreateTrade />} />
+          <Route path="/trades/:id" element={<TradeDetails />} />
+          <Route path="/trades/:id/edit" element={<EditTrade />} />
+        </Route>
+      </Route>
+
+      <Route path="*" element={<NotFound />} />
+    </Routes>
   );
 }
 
