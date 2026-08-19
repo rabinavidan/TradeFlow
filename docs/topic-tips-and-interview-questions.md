@@ -543,6 +543,119 @@ in one sentence why curl to the same endpoint still works fine.
 
 ---
 
+## P. Testing
+
+**Development Tips**
+- Keep the pyramid shape: many fast unit/integration tests, fewer
+  component tests, only a handful of E2E tests for genuinely critical paths.
+- Test behavior (what a user/caller observes), not implementation details
+  (internal state, private functions) — implementation can change freely
+  as long as behavior doesn't.
+- Make tests deterministic: unique fixture data per test (unique emails),
+  no reliance on execution order, no shared mutable state between tests
+  unless deliberately isolated.
+
+**Common Mistakes**
+- Depending on a resolved `await` for an action's *trigger* as proof that
+  everything it kicked off asynchronously has finished.
+- Sharing database state across parallel test files without either
+  isolating it or running those files sequentially.
+- Debugging a flaky test by treating the first plausible-looking cause as
+  confirmed, without actually verifying it eliminates the failure.
+
+**Debugging Tips**
+- Reproduce a flaky failure in the smallest possible isolated script before
+  trusting an environmental explanation.
+- Read the actual page/state snapshot in a failure report — don't assume
+  you know what's rendered; confirm it.
+- When a fix doesn't change the observed failure, that's real information:
+  the theory was wrong, not that the fix "needs more tweaking."
+
+**Interview Questions**
+1. What's the test pyramid, and why shape testing effort that way?
+2. What should be mocked, and what shouldn't?
+3. What is AAA (Arrange-Act-Assert), and why does it help test readability?
+
+**Strong Interview Answers**
+- *What should be mocked?* Mock external dependencies you don't control or
+  that make tests slow/flaky (real third-party APIs, wall-clock time,
+  randomness). Don't mock the thing you're actually testing, or so much of
+  the system that the test stops verifying real behavior — Phase 6's E2E
+  suite deliberately mocks nothing, running the real API against a real
+  (in-memory) database, because its entire purpose is verifying real
+  integration.
+
+**Project Example**
+Server integration tests use a real in-memory MongoDB (no DB mocking);
+client component tests mock only the API layer (`vi.mock('../api/...')`),
+never React or the DOM; E2E tests mock nothing at all.
+
+**Mini Exercise**
+Take one existing Vitest integration test and rewrite its assertions using
+explicit Arrange/Act/Assert comments — notice whether the test already
+reads that way naturally, or whether commenting it reveals a step out of order.
+
+---
+
+## Q. Playwright
+
+**Development Tips**
+- Prefer user-facing locators (`getByRole`, `getByLabel`) over CSS
+  selectors — they fail loudly when accessibility semantics break, and
+  read like what a real user would look for.
+- Rely on Playwright's auto-waiting (locators wait for actionability) —
+  avoid manual `waitForTimeout` sleeps, which are both slow and flaky.
+- After any action that triggers async client-side work (an API call, a
+  React Router navigation), assert on the observable result
+  (`toHaveURL`, a visible element) before depending on it — never assume a
+  resolved click means its side effects are done.
+- Use the Page Object Model to keep spec files reading like user behavior,
+  with selectors/low-level actions isolated in one place.
+
+**Common Mistakes**
+- Reading `page.url()` (or any other page state) immediately after a
+  triggering action without first waiting for the navigation it causes.
+- Brittle CSS-class or nth-child selectors that break on unrelated styling
+  changes.
+- Assuming a failure's most visible/noisy symptom (e.g. console errors) is
+  automatically its root cause.
+
+**Debugging Tips**
+- `trace: 'retain-on-failure'` + `npx playwright show-trace` gives a full
+  timeline (DOM snapshots, network, console) for any failure — read it
+  before guessing.
+- A failure's page snapshot in the HTML report shows exactly what was
+  rendered at the moment of failure — often the fastest way to disprove a
+  wrong theory about the cause.
+
+**Interview Questions**
+1. What does Playwright's auto-waiting do, and why does it reduce flakiness?
+2. Locator vs. raw CSS selector — what's the difference in intent?
+3. What is the Page Object Model, and what's its main benefit?
+4. How do you debug a flaky E2E test?
+
+**Strong Interview Answers**
+- *How do you debug a flaky E2E test?* Reproduce it in isolation with a
+  minimal script and explicit logging (network responses, URLs, page
+  state) rather than staring at the full suite's noisy output. Check the
+  trace/snapshot for what actually rendered at failure time instead of
+  assuming. Verify any fix by confirming the failure is actually gone —
+  not just that the theory sounds plausible.
+
+**Project Example**
+`e2e/pages/*.ts` — one POM class per page/concern; `e2e/tests/permissions.spec.ts`
+explicitly asserts `toHaveURL(...)` after every registration and trade
+creation before depending on the resulting URL, after two real bugs
+(missing exactly that wait) were found and fixed during this phase.
+
+**Mini Exercise**
+Remove one `await expect(page).toHaveURL(...)` assertion from
+`permissions.spec.ts` and re-run the suite a few times — observe how often
+(not always) it fails, and why that unpredictability is exactly what makes
+missing-wait bugs dangerous in E2E suites.
+
+---
+
 ## S. HTML + CSS
 
 **Development Tips**

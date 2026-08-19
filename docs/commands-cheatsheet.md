@@ -43,13 +43,17 @@ mongosh "mongodb://localhost:27017/tradeflow-lite"
 > db.traderequests.find().limit(5)
 ```
 
-## Testing (added in later phases)
+## Testing
 
 ```bash
 npm run test --workspace server           # Vitest: unit + API integration
 npm run test --workspace client           # Vitest + React Testing Library
-npm run test:e2e                          # Playwright E2E suite
-npx playwright show-report                # open last E2E HTML report
+npm run test                              # both, in sequence
+
+npm run test:e2e                          # full Playwright E2E suite (starts real servers)
+npx playwright test --config e2e/playwright.config.ts e2e/tests/auth.spec.ts   # one file
+npx playwright show-report e2e/playwright-report                               # open last HTML report
+npx playwright show-trace e2e/test-results/<test-dir>/trace.zip                # inspect one failure's trace
 ```
 
 ## Docker (Phase 8)

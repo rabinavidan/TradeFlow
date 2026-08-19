@@ -13,7 +13,13 @@ import { analyticsRouter } from './routes/analytics.routes.js';
 export function createApp(): Express {
   const app = express();
 
-  app.use(helmet());
+  // HSTS tells the browser "only ever use HTTPS for this origin, remember
+  // that for a year" — correct in production behind real TLS, but actively
+  // harmful in development/test: the API here is served over plain HTTP,
+  // and a browser that's cached an HSTS policy for localhost will keep
+  // silently retrying requests over HTTPS in the background (which fail
+  // instantly against a non-TLS server) for as long as that policy lives.
+  app.use(helmet({ hsts: env.NODE_ENV === 'production' }));
   app.use(cors({ origin: env.CORS_ORIGIN, credentials: true }));
   app.use(express.json({ limit: '100kb' }));
   app.use(requestLogger);

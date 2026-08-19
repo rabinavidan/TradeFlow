@@ -275,6 +275,57 @@ assumption about isolation that stopped being true once the suite grew.
 **Follow-up Question:** What's an alternative fix that would let test files
 run in parallel again while keeping this kind of test safe?
 
+## Playwright / E2E
+
+### Question: Why did `Strict-Transport-Security` cause confusing, hard-to-diagnose failures specifically in the E2E test environment?
+**Short Answer:** The browser caches HSTS per-origin and then silently
+retries requests over HTTPS, which fails instantly against a plain-HTTP
+dev/test server.
+**Strong Answer:** `helmet()`'s defaults include sending
+`Strict-Transport-Security: max-age=31536000; includeSubDomains` on every
+response — correct and desirable behavior in production, where the app is
+actually served over HTTPS. But a browser that receives this header
+remembers, for that origin, "always use HTTPS from now on, for up to a
+year" — regardless of whether the server was ever actually reachable over
+HTTPS. In this project's E2E environment, the test API server is plain
+HTTP; once the browser received that header from an earlier request, it
+began silently attempting to upgrade background/prefetch requests to
+HTTPS, which failed instantly (nothing is listening for TLS), producing a
+flood of confusing network errors with no direct connection to anything
+in the test code. The fix is to make HSTS conditional:
+`helmet({ hsts: env.NODE_ENV === 'production' })`.
+**Project Example:** `server/src/app.ts`.
+**Common Mistake:** Treating "the security middleware defaults are always
+safe to apply everywhere" as true — some security headers are only correct
+given assumptions (like "this is actually served over TLS") that don't
+hold in every environment.
+**Follow-up Question:** What other `helmet()` defaults might also need to
+be environment-conditional, and why?
+
+### Question: Why did `page.url()` sometimes return a stale value immediately after a button click that triggers navigation?
+**Short Answer:** A resolved click only means the click event fired — not
+that whatever it asynchronously triggered has completed.
+**Strong Answer:** In this app, submitting the "create trade" form doesn't
+navigate synchronously — it calls a mutation, waits for the API response,
+and only then calls React Router's `navigate()` inside a `.then()`/`await`
+chain in an event handler. Playwright's `locator.click()` resolves once
+the click event has been dispatched and any immediate DOM updates settle —
+it has no way to know about a `fetch` call and subsequent `navigate()`
+still in flight afterward. Reading `page.url()` right after that click
+races against that async chain: sometimes it wins (URL already updated),
+sometimes it doesn't (URL still shows the previous page). The fix is to
+never depend on `page.url()` (or any other post-navigation state) without
+first asserting the expected result, e.g.
+`await expect(page).toHaveURL(/\/trades\/[a-f0-9]+$/)`.
+**Project Example:** `e2e/tests/permissions.spec.ts`, after this bug was
+found and fixed.
+**Common Mistake:** Assuming synchronous-looking test code
+(`await click(); const url = page.url();`) is safe just because it reads
+top-to-bottom — async side effects don't respect that ordering unless
+explicitly awaited via their observable result.
+**Follow-up Question:** Would this bug have been caught by a unit or
+component test instead? Why or why not?
+
 ## Git
 
 ### Question: What belongs in `.gitignore` for a full-stack Node/React project?

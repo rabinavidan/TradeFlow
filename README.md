@@ -9,10 +9,11 @@ admins act on them under role-based permissions.
 This is a technical portfolio project. It does not model real financial
 regulation.
 
-> **Status:** Phase 5 complete — project scaffold, JWT authentication, the
-> Trade Request backend and full CRUD UI, the reviewer workflow (RBAC +
-> audit history), and a real analytics dashboard (MongoDB `$facet`
-> aggregation for totals, status breakdown, and recent requests). See
+> **Status:** Phase 6 complete — the full application (auth, trade CRUD,
+> reviewer workflow, analytics) plus a full test suite: 37 server tests,
+> 20 client tests, and an 8-scenario Playwright E2E suite (POM) covering
+> register/login, full CRUD, search/filter, the reviewer workflow, and
+> unauthorized-access blocking. See
 > [docs/learning-notes.md](docs/learning-notes.md) for phase-by-phase
 > progress and [docs](docs) for the full learning material.
 
@@ -82,6 +83,8 @@ and shows the API/DB status, proving the two are wired together.
 npm run lint
 npm run typecheck
 npm run build
+npm run test           # server + client unit/integration tests
+npm run test:e2e       # Playwright E2E suite (starts its own real servers + in-memory MongoDB)
 ```
 
 ## Quick health check

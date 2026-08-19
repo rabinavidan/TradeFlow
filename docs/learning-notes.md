@@ -1097,3 +1097,228 @@ pipeline blind made it easy to be confident about the final shape.
 **MINI CODING EXERCISE**
 Add an `averageAmount` field to the analytics summary using `$avg` inside
 the existing `$facet`, and surface it as a new stat card on the dashboard.
+
+---
+
+## Phase 6 — Testing (Playwright E2E)
+
+### What we built
+
+Unit, integration, and component tests already existed from every prior
+phase (37 server tests, 20 client tests). Phase 6 adds the top of the test
+pyramid: a Playwright end-to-end suite driving the real, running app
+through a real browser.
+
+- `e2e/playwright.config.ts` — starts two real servers before the suite
+  runs (`webServer`, an array): the compiled-free API server via
+  `tsx src/tests/e2eServer.ts` against a real (in-memory) MongoDB, and the
+  actual Vite dev server the app ships with — no mocking anywhere in this
+  layer.
+- `server/src/tests/e2eServer.ts` — boots `mongodb-memory-server` on a
+  **pinned** port (unlike the Vitest suite's random port) specifically so
+  a separate test-fixture helper can connect to the same database directly.
+- `e2e/utils/db.ts` — a deliberate, commented "test-only backdoor":
+  connects to that pinned MongoDB directly to promote a user to `reviewer`,
+  since there's intentionally no UI/API for that (role assignment is an
+  admin/ops concern per Phase 4).
+- `e2e/pages/*.ts` — Page Object Model classes (`LoginPage`, `RegisterPage`,
+  `DashboardPage`, `TradeListPage`, `TradeFormPage`, `TradeDetailsPage`)
+  wrapping selectors and actions, so the actual spec files read like a
+  script of user behavior, not a pile of raw locators.
+- `e2e/tests/auth.spec.ts`, `trades.spec.ts`, `permissions.spec.ts` — the 7
+  required scenarios: register/login, create, view, edit, search/filter,
+  a reviewer moving a request through the full review workflow, and an
+  unauthorized stranger being blocked from another user's request.
+
+### Concepts learned
+
+**E2E tests exercise the real system, not a simulation of it.** Every
+layer built in Phases 0–5 — Express routes, Mongoose queries, React
+components, TanStack Query, real HTTP over a real network stack — runs for
+real here. Nothing is mocked. That's what makes E2E tests valuable (they
+catch integration bugs unit/component tests structurally cannot see) and
+also what makes them slow and comparatively fragile — hence "a few, for
+the critical paths," not "test everything this way."
+
+**Debugging training, for real this time.** Two genuine bugs surfaced
+while building this suite, both the same root cause pattern — see below.
+Both were found by *not* trusting an environment-noise explanation and
+instead reproducing the failure in isolation with explicit logging until
+the actual mechanism was visible.
+
+**A DB-fixture backdoor is a legitimate, common E2E technique.** Some test
+setup (like "this user is a reviewer") intentionally has no product-facing
+path to create it — that's a *feature* of the RBAC design (Phase 4), not a
+testing gap. `e2e/utils/db.ts` connects directly to the same database the
+app under test uses, does the one privileged write the UI will never
+expose, and is clearly commented as test-only infrastructure — never
+something the app itself would do.
+
+### Important code
+
+```ts
+// server/src/app.ts — the real bug this phase's debugging found
+app.use(helmet({ hsts: env.NODE_ENV === 'production' }));
+```
+
+```ts
+// e2e/tests/permissions.spec.ts — the other real bug this phase found:
+// always wait for an async client-side navigation before trusting page.url()
+await new TradeFormPage(page).createTrade({ /* ... */ });
+await expect(page).toHaveURL(/\/trades\/[a-f0-9]+$/);   // <- was missing
+const tradeUrl = page.url();                              // now reliably correct
+```
+
+### Important commands
+
+```bash
+npx playwright test --config e2e/playwright.config.ts        # run the whole E2E suite
+npx playwright test --config e2e/playwright.config.ts e2e/tests/auth.spec.ts   # one file
+npx playwright show-trace e2e/test-results/<test-dir>/trace.zip                # inspect a failure
+```
+
+### Problems solved
+
+**Bug 1 — Root cause turned out NOT to be the environment.** Two E2E tests
+consistently timed out or failed with confusing symptoms: a `.form-error`
+banner that "wasn't there," a `getByLabel('Comment (optional)')` that
+never appeared, `browserContext.close()` hanging past a 60-second timeout.
+The terminal was flooded the entire time with Chromium background-service
+SSL handshake failures (`net::ERR_CONNECTION_RESET` against random ports),
+which was an extremely convincing red herring.
+
+**What I thought caused it (hint given first, three separate times as the
+investigation deepened):** *Hint 1: what response header does this server
+send on every single request, even in development, that specifically
+instructs a browser to remember "always use HTTPS for this origin"?*
+*Hint 2 (after fixing that and the failure persisted): standalone
+reproduction scripts of the exact same register→navigate flow worked
+perfectly every time — so what's structurally different between those
+scripts and the actual failing test file?* *Hint 3: look at what the page
+snapshot in the failure report actually shows, not what you assume it
+shows.*
+
+**Root cause (two distinct, stacked issues, found in this order):**
+1. `helmet()` sends `Strict-Transport-Security` by default, even when the
+   server is only ever reached over plain HTTP in development/test. A
+   browser that receives this header remembers "HTTPS-only" for that
+   origin and silently retries background/prefetch requests over HTTPS —
+   which fail instantly against a server that doesn't speak TLS — for as
+   long as the policy is cached. This was a real bug worth fixing on its
+   own merits, not just for the tests.
+2. After fixing that, failures continued with a *different* symptom —
+   `page.url()` captured right after `createTrade()` sometimes still
+   pointed at `/trades/new` instead of the new trade's details page. The
+   test never `await`ed the *client-side* navigation that follows a
+   successful create (`navigate(`/trades/${id}`)` inside a React event
+   handler, asynchronous, not tied to `page.goto()`'s own load event) —
+   so `page.url()` could run before that navigation had actually happened.
+   The `.form-error` and `getByLabel('Comment...')` failures were entirely
+   downstream of a wrong URL, not "the app is confused" — the app was
+   behaving correctly the whole time.
+
+**Fix:** `helmet({ hsts: env.NODE_ENV === 'production' })`, plus adding
+`await expect(page).toHaveURL(...)` after every action that triggers an
+async client-side navigation, before ever reading `page.url()` or issuing
+the next `page.goto()`.
+
+**Prevention:** In Playwright (or any browser-automation) tests, never
+assume an action "must have finished" just because the `await` on the
+*trigger* (a click, a form fill) resolved — a click resolving only means
+the click event fired, not that whatever it kicked off asynchronously
+(an API call, a client-side route change) has completed. Always assert on
+the *observable result* (a URL, a visible element) before depending on it.
+And when several failures share one visible symptom, verify the *actual*
+mechanism with a minimal, isolated reproduction before trusting an
+environmental explanation — however convincing the surrounding noise looks.
+
+### Interview questions
+
+1. **Why is `Strict-Transport-Security` dangerous to send in development,
+   even though it's a real security best practice in production?** —
+   Browsers cache HSTS policies per-origin; a dev server that's plain HTTP
+   but sends HSTS teaches the browser to distrust plain HTTP for that
+   origin going forward, causing confusing, silent failures on background/
+   prefetch requests for as long as the policy is remembered.
+2. **Why did `page.url()` sometimes return a stale value right after a
+   button click that triggers navigation?** — The click handler resolving
+   only means the click event was dispatched; any asynchronous work it
+   kicks off (an API call, then a client-side `navigate()` call) hasn't
+   necessarily completed yet. `page.url()` reads whatever the current URL
+   is *at that instant*, not "the URL once everything settles."
+3. **What is a "test-only backdoor," and why is `e2e/utils/db.ts` an
+   acceptable one rather than a testing anti-pattern?** — It's test
+   infrastructure that bypasses the product surface to set up a fixture
+   the UI/API deliberately doesn't expose (promoting a user's role). It's
+   acceptable because it's clearly isolated (its own file, heavily
+   commented), never imported by application code, and sets up state
+   rather than replacing an assertion — the actual test still exercises
+   the real app through the real UI.
+
+### What I should remember
+
+- Always wait for the *observable effect* of an action (a URL, visible
+  text) before trusting that the action's async side effects are done —
+  never assume a resolved `await` on a click means everything it triggered
+  has finished.
+- Security headers like HSTS are environment-sensitive — gate them on
+  `NODE_ENV`, never send them unconditionally in a dev/test server.
+- When debugging, don't stop investigating just because you found *an*
+  explanation that fits the symptoms — verify it actually eliminates the
+  failure before moving on; a second, unrelated bug can hide behind noisy
+  evidence that all seems to point one direction.
+- A deliberate, well-commented test-only DB backdoor is fine for fixture
+  setup the product intentionally doesn't expose — keep it isolated and
+  obviously test-only.
+
+---
+
+### Phase 6 review
+
+**TOP 5 THINGS TO REMEMBER**
+1. E2E tests run the real stack end-to-end — valuable for catching
+   integration bugs, but slow/fragile, so reserve them for critical paths.
+2. Never send `Strict-Transport-Security` outside production — it's cached
+   by the browser and breaks plain-HTTP dev/test environments silently.
+3. A resolved `await` on a UI action means the action fired, not that its
+   async side effects (API calls, client-side navigation) are done —
+   always assert on the observable result before depending on it.
+4. Page Object Model classes keep spec files readable as "what a user
+   does," with selectors and low-level actions isolated in one place.
+5. A clearly-commented, isolated test-only DB backdoor is legitimate for
+   fixture setup the product deliberately doesn't expose via its own UI/API.
+
+**TOP 5 INTERVIEW QUESTIONS**
+1. Unit vs. integration vs. E2E — what does each layer actually verify,
+   and what can only E2E catch?
+2. Why can `Strict-Transport-Security` cause confusing bugs in a dev
+   environment specifically?
+3. Why must you wait for an observable result instead of trusting that a
+   resolved `await` on a click means its side effects finished?
+4. What is the Page Object Model, and what problem does it solve?
+5. When is a "test-only backdoor" (bypassing the UI/API for fixture setup)
+   acceptable, and when does it become an anti-pattern?
+
+**TOP 3 DEVELOPMENT TIPS**
+1. Gate every environment-sensitive security header (HSTS, secure cookies)
+   on `NODE_ENV`, and verify the gate actually works in dev, not just prod.
+2. In E2E tests, assert on the *result* (URL, visible text) of every action
+   that triggers async work, immediately after that action — don't chain
+   multiple un-asserted steps and hope timing works out.
+3. When several failures share a noisy, plausible-looking cause, still
+   verify it with an isolated minimal reproduction before accepting it —
+   don't let convincing background noise become confirmation bias.
+
+**TOP 3 COMMON MISTAKES**
+1. Sending production-only security headers unconditionally, breaking
+   local development in subtle, hard-to-diagnose ways.
+2. Capturing `page.url()` or otherwise depending on navigation state
+   immediately after a triggering action, without waiting for the
+   navigation to actually complete.
+3. Accepting the first plausible-looking explanation for a flaky test
+   without verifying it actually fixes the failure.
+
+**MINI CODING EXERCISE**
+Add an 8th E2E scenario: a `Rejected` trade's owner can see the rejection
+reason (the reviewer's comment) directly on the details page, using the
+`StatusHistoryList` component's rendered output.

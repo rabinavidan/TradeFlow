@@ -83,6 +83,22 @@ For a wide Q&A bank see [interview-question-bank.md](interview-question-bank.md)
   on every request rather than maintaining a running counter — no
   stored/actual drift is possible, and it's cheap at this data scale.
 
+## Testing / Playwright (E2E)
+
+- **Test pyramid**: many fast unit/integration tests, fewer component
+  tests, a handful of E2E tests for critical paths only — E2E is slow and
+  comparatively fragile because it exercises the real, un-mocked system.
+- **Never trust a resolved `await` on a UI trigger as proof its async side
+  effects finished** — always assert on the observable result (a URL, a
+  visible element) before depending on it.
+- **HSTS is environment-sensitive**: `helmet({ hsts: env.NODE_ENV === 'production' })` —
+  sending it unconditionally breaks plain-HTTP dev/test environments in
+  confusing, hard-to-diagnose ways (the browser silently retries requests
+  over HTTPS from then on).
+- **Test-only DB backdoors** are legitimate for fixture setup the product
+  deliberately doesn't expose (e.g. promoting a role) — keep them isolated,
+  well-commented, and never imported by application code.
+
 ## Git
 
 - **`git status`** before anything destructive.
