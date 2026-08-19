@@ -12,9 +12,10 @@ regulation.
 > **Status:** All 11 phases complete — the full application, a full test
 > suite (42 server + 22 client + 8 E2E), production-reliability basics, a
 > full Docker setup (`docker compose up --build` runs client + server +
-> MongoDB together), a GitHub Actions CI pipeline, an optional AI-assisted
-> description generator backed by a local Ollama model, interactive API
-> docs (`GET /api/docs`), and a one-command demo seed script. See
+> MongoDB together), a GitHub Actions CI pipeline (plus a nightly Allure-
+> reported E2E run), an optional AI-assisted description generator backed
+> by a local Ollama model, interactive API docs (`GET /api/docs`), and a
+> one-command demo seed script. See
 > [docs/learning-notes.md](docs/learning-notes.md) for phase-by-phase
 > progress and [docs](docs) for the full learning material.
 

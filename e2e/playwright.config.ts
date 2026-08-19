@@ -1,7 +1,26 @@
-import { defineConfig, devices } from '@playwright/test';
+import { defineConfig, devices, type ReporterDescription } from '@playwright/test';
 
 const CLIENT_URL = 'http://localhost:5183';
 const API_URL = 'http://localhost:4099/api';
+
+const reporters: ReporterDescription[] = process.env.CI
+  ? [
+      ['github'],
+      ['html', { outputFolder: './playwright-report', open: 'never' }],
+    ]
+  : [['list']];
+
+// Allure is opt-in via GENERATE_ALLURE, not tied to CI generally — the
+// per-PR e2e job doesn't need it (the html/github reporters cover that),
+// it's only turned on for the nightly Allure run and local report
+// generation (`npm run test:e2e:allure`).
+if (process.env.GENERATE_ALLURE === 'true') {
+  // Unlike the html reporter's outputFolder, allure-playwright resolves
+  // resultsDir relative to process.cwd() at invocation, not this config
+  // file's directory — both the npm script and the nightly CI job always
+  // invoke Playwright from the repo root, so the path is written that way.
+  reporters.push(['allure-playwright', { resultsDir: 'e2e/allure-results' }]);
+}
 
 export default defineConfig({
   testDir: './tests',
@@ -11,9 +30,7 @@ export default defineConfig({
   retries: process.env.CI ? 1 : 0,
   workers: 1,
   timeout: 60_000,
-  reporter: process.env.CI
-    ? [['github'], ['html', { outputFolder: './playwright-report', open: 'never' }]]
-    : [['list']],
+  reporter: reporters,
 
   use: {
     baseURL: CLIENT_URL,

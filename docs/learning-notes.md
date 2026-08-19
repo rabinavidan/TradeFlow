@@ -2272,3 +2272,40 @@ analytics, a 72-scenario test suite (42 server + 22 client + 8 E2E),
 production-reliability basics, Docker, CI/CD, an optional local-AI feature,
 interactive API docs, and interview-ready documentation. See the README for
 where to start, and `docs/interview-demo-script.md` for how to show it off.
+
+---
+
+## Post-launch addition — Nightly E2E with Allure reporting
+
+A small follow-up after the 11 phases: a second, scheduled workflow
+(`.github/workflows/nightly-e2e.yml`) runs the Playwright E2E suite every
+night with the `allure-playwright` reporter, generates an interactive
+Allure HTML report, and writes a markdown pass/fail digest straight into
+that run's GitHub Actions **Summary** tab.
+
+**Why a separate workflow, not folded into `ci.yml`**: the nightly run's
+job is different from the PR-gating `ci.yml` — it's about trend visibility
+over time, not fast per-PR feedback. Keeping it separate means the PR
+critical path never pays for Allure's extra reporter/report-generation
+overhead, and the two workflows can be tuned independently (a nightly run
+can afford to be slower and heavier).
+
+**The one non-obvious finding**: `allure-playwright`'s `resultsDir` option
+resolves relative to `process.cwd()` at the moment Playwright is invoked —
+*not* relative to `playwright.config.ts`'s own location, unlike the built-in
+`html` reporter's `outputFolder`. Since both the npm script and the CI job
+always invoke Playwright from the repo root, `resultsDir: 'e2e/allure-results'`
+is correct in practice, but it's a real gotcha if that assumption ever
+changes (e.g. someone runs Playwright from inside `e2e/`).
+
+**Why the report doesn't render directly inside the Summary tab**: GitHub
+Actions' Summary tab only renders a sanitized markdown/HTML subset — no
+JavaScript, so a full single-page app like Allure's HTML report can't be
+embedded live. The workaround used here: write a compact markdown digest
+(pass/fail counts, duration, failure list) into the Summary via
+`GITHUB_STEP_SUMMARY` for the at-a-glance view, and attach the full
+interactive report as a downloadable workflow artifact on the same run for
+anyone who needs to dig in.
+
+Commands: see `docs/commands-cheatsheet.md`'s "Nightly E2E + Allure
+reports" section.

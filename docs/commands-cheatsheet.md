@@ -74,6 +74,26 @@ docker exec -it tradeflow-server-1 sh   # shell into a running container
 CI runs the same commands above (`lint`, `typecheck`, `test`, `build`) on
 every PR and push to `main` — see `.github/workflows/ci.yml`.
 
+## Nightly E2E + Allure reports
+
+A separate scheduled workflow (`.github/workflows/nightly-e2e.yml`, cron
+`0 3 * * *` UTC, also runnable on demand via "Run workflow") runs the full
+Playwright E2E suite with the Allure reporter and generates an interactive
+HTML report:
+
+```bash
+npm run test:e2e:allure   # runs E2E, writes raw results to e2e/allure-results
+npm run allure:generate   # builds the interactive HTML report to e2e/allure-report
+npm run allure:open       # opens it in a browser (local only)
+```
+
+On GitHub, the run's **Summary** tab shows a markdown digest (pass/fail
+counts, duration, any failures) written directly by
+`.github/scripts/allure-summary.mjs` — no download needed for the headline
+numbers. The full interactive report is attached to that same run as the
+`allure-report` artifact (GitHub can't embed a JS single-page app directly
+inside the Summary tab, only markdown).
+
 ## Health check
 
 ```bash

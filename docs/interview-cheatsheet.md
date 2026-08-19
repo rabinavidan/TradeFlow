@@ -151,6 +151,15 @@ For a wide Q&A bank see [interview-question-bank.md](interview-question-bank.md)
 - **E2E is informative, not merge-blocking**: it runs on every PR for
   visibility, but isn't treated as a required status check, since it's the
   slowest and most environment-sensitive layer of the test pyramid.
+- **Nightly Allure run is separate from the PR gate**: a second scheduled
+  workflow (`nightly-e2e.yml`) runs the same E2E suite with the
+  `allure-playwright` reporter and generates a trend-friendly interactive
+  report — kept out of the PR-gating `ci.yml` so it doesn't slow down or
+  complicate every pull request's feedback loop.
+- **A workflow's Summary tab only renders markdown**: it can't embed
+  Allure's HTML report directly (a JS single-page app), so the nightly job
+  writes a short markdown digest into the Summary tab itself and attaches
+  the full interactive report as a downloadable artifact on the same run.
 
 ## Optional AI (Ollama)
 
