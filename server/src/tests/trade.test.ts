@@ -80,6 +80,10 @@ describe('POST /api/trades', () => {
       .send({ ...validTrade, amount: -5 });
 
     expect(res.status).toBe(422);
+    // requestId lets a user report "error X" and have it map directly to
+    // one server log line, without matching on timestamps/descriptions.
+    expect(typeof res.body.error.requestId).toBe('string');
+    expect(res.headers['x-request-id']).toBe(res.body.error.requestId);
   });
 });
 

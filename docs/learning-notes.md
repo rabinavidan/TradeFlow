@@ -1322,3 +1322,158 @@ environmental explanation — however convincing the surrounding noise looks.
 Add an 8th E2E scenario: a `Rejected` trade's owner can see the rejection
 reason (the reviewer's comment) directly on the details page, using the
 `StatusHistoryList` component's rendered output.
+
+---
+
+## Phase 7 — Reliability
+
+### What we built
+
+Most of this phase's checklist (structured logging, centralized error
+handling, request timing, health checks, correlation IDs) already existed
+from Phase 0 — `pino`/`pino-http`, `errorHandler.ts`, `/api/health`. What
+was genuinely missing:
+
+- **Graceful shutdown** (`server/src/index.ts`): on `SIGTERM`/`SIGINT`,
+  stop accepting new connections, let in-flight requests finish
+  (`server.close()`), disconnect MongoDB, then exit — with a 10-second
+  force-exit timer as a backstop if something hangs.
+- **Process-level safety nets**: `uncaughtException` and
+  `unhandledRejection` handlers that log the error and exit, rather than
+  leaving the process running in an unknown, untested state.
+- **Correlation ID on error responses**: `errorHandler.ts` now includes
+  `requestId` (pino-http's per-request `req.id`, already echoed on the
+  `x-request-id` response header) directly in the JSON error body — so a
+  user reporting "I got error X" hands over one id that maps to an exact
+  server log line, no timestamp-matching required.
+
+### Concepts learned
+
+**Graceful shutdown matters most exactly when you'd least expect to test
+it.** Every deploy, restart, or container reschedule sends `SIGTERM`
+first (`SIGKILL` only after a grace period). Without handling it, every
+single deploy could sever in-flight requests mid-response — invisible in
+local development (you rarely `Ctrl+C` mid-request), but a real, repeated
+source of dropped requests in production. This is exactly the kind of gap
+that "works on my machine" and then quietly costs a percentage of
+requests at every deploy in a real system — Docker (Phase 8) makes this
+concrete, since `docker stop` sends `SIGTERM` too.
+
+**A crash you didn't anticipate is not a crash you should try to survive.**
+`uncaughtException`/`unhandledRejection` don't attempt to keep the process
+alive — they log and exit. Trying to "recover" from a truly unexpected
+error risks continuing in a corrupted state (a half-updated in-memory
+value, a connection in a bad state) that's worse than a clean restart. Let
+the orchestrator's restart policy do its job.
+
+**A correlation ID closes the loop between "user reports a problem" and
+"engineer finds the log line."** Structured logs are only searchable if
+you have *something* to search by — `x-request-id`/`requestId` is that
+handle, generated once per request and threaded through the log entry,
+the response header, and now the error body itself.
+
+### Important code
+
+```ts
+// server/src/index.ts — the shutdown sequence a container orchestrator expects
+server.close(async (err) => {
+  await disconnectDB();
+  process.exit(err ? 1 : 0);
+});
+```
+
+```ts
+// server/src/middleware/errorHandler.ts — one id, three places to find it
+body.error.requestId = req.id ? String(req.id) : undefined; // in the response body
+// ...also already on the x-request-id response header, and in every pino log line
+```
+
+### Important commands
+
+```bash
+# manually verify shutdown behavior
+node dist/index.js &
+kill -TERM $!   # should log "Shutting down gracefully" then "Shutdown complete" and exit 0
+```
+
+### Problems solved
+
+No new bugs this phase — everything was additive, and each piece
+(shutdown, safety nets, requestId) was verified directly: a manual SIGTERM
+test confirmed clean shutdown and exit code 0, and a server test asserts
+`res.body.error.requestId` matches the `x-request-id` response header.
+
+### Interview questions
+
+1. **Why does a container orchestrator send `SIGTERM` before `SIGKILL`,
+   and what should an app do in that window?** — `SIGTERM` is a request to
+   shut down cleanly; the app should stop accepting new work, finish
+   in-flight requests, release resources (DB connections), then exit on
+   its own — `SIGKILL` (unavoidable, un-catchable) is the orchestrator's
+   fallback if the app doesn't exit in time.
+2. **Why do `uncaughtException`/`unhandledRejection` handlers exit the
+   process instead of trying to keep it running?** — An error the app
+   didn't anticipate means its internal state is now unknown; continuing
+   risks operating on corrupted state, which is worse than a clean,
+   supervised restart.
+3. **What problem does a correlation/request ID solve that structured
+   logging alone doesn't?** — Structured logs are searchable, but only if
+   you know what to search *for*; a request ID surfaced to the client
+   (response header, error body) gives a direct handle a user can report
+   back, connecting "what the user saw" to "the exact log line" instantly.
+
+### What I should remember
+
+- `server.close()` stops accepting *new* connections but waits for
+  in-flight ones — that's what makes shutdown "graceful" rather than an
+  abrupt cutoff.
+- Always pair a graceful-shutdown attempt with a force-exit timer — a hung
+  cleanup step (a stuck DB disconnect) shouldn't block shutdown forever.
+- `uncaughtException`/`unhandledRejection` are a last-resort net for bugs,
+  not a substitute for `try/catch` or the `errorHandler` middleware —
+  reaching them means something wasn't handled where it should have been.
+
+---
+
+### Phase 7 review
+
+**TOP 5 THINGS TO REMEMBER**
+1. Handle `SIGTERM` to shut down gracefully — stop new connections, finish
+   in-flight ones, release resources, then exit.
+2. Always back a graceful shutdown with a force-exit timer, in case
+   cleanup itself hangs.
+3. `uncaughtException`/`unhandledRejection` should log and exit — never
+   try to keep running after state becomes unknown.
+4. A request/correlation ID belongs in three places: the log line, the
+   response header, and (for errors) the response body itself.
+5. Health checks should reflect real dependency health (DB connectivity),
+   not just "the process is alive."
+
+**TOP 5 INTERVIEW QUESTIONS**
+1. What's the difference between SIGTERM and SIGKILL, and why does it matter?
+2. Why exit on an uncaught exception instead of trying to recover?
+3. What does `server.close()` actually do, and what does it wait for?
+4. Why include a request ID in an error response body, not just server logs?
+5. What's the difference between a liveness check and a readiness check?
+   (Bonus: this project's `/api/health` currently conflates them — explain
+   the tradeoff.)
+
+**TOP 3 DEVELOPMENT TIPS**
+1. Test graceful shutdown manually at least once — `kill -TERM $(pid)` and
+   watch the logs — don't assume it works just because it compiles.
+2. Always pair a cleanup sequence with a timeout backstop.
+3. Thread one correlation ID through logs, response headers, and error
+   bodies from the very first request-logging middleware — retrofitting
+   it later means touching every layer again.
+
+**TOP 3 COMMON MISTAKES**
+1. Never handling SIGTERM, so every deploy silently drops in-flight requests.
+2. Trying to recover from an uncaught exception instead of exiting cleanly.
+3. Building structured logs without a correlation ID, making "find the log
+   line for this user's report" far harder than it needs to be.
+
+**MINI CODING EXERCISE**
+Split `/api/health` into `/api/health/live` (process is running — always
+200) and `/api/health/ready` (dependencies like MongoDB are reachable —
+what today's single `/api/health` does), matching the liveness/readiness
+distinction Kubernetes expects.

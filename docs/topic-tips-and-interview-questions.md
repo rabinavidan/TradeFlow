@@ -656,6 +656,60 @@ missing-wait bugs dangerous in E2E suites.
 
 ---
 
+## U. Logging + Observability
+
+**Development Tips**
+- Use structured (JSON) logs, not `console.log` — they're queryable/
+  filterable by a log aggregator, unlike free-form text.
+- Attach a correlation/request ID at the very first middleware, and thread
+  it through logs, response headers, and error bodies.
+- Handle `SIGTERM` for graceful shutdown — stop new work, finish in-flight
+  work, release resources, then exit — always backed by a force-exit timer.
+- Let `uncaughtException`/`unhandledRejection` log and exit; don't try to
+  keep a process alive once its state is unknown.
+
+**Common Mistakes**
+- Logging unstructured strings that are hard to search/filter at scale.
+- Never testing graceful shutdown manually — it "compiles" but nobody
+  actually sent it a SIGTERM to see what happens.
+- Confusing a liveness check ("is the process running") with a readiness
+  check ("can it actually serve traffic right now") — this project's
+  single `/api/health` intentionally conflates them for simplicity, a
+  reasonable tradeoff at this scale but worth being able to explain.
+
+**Debugging Tips**
+- Search production logs by request ID first when investigating a specific
+  user's reported issue — it's the fastest path from "user says X" to "the
+  exact request that caused it."
+- `kill -TERM $(pgrep -f your-process)` locally is the fastest way to
+  verify graceful shutdown actually behaves as coded.
+
+**Interview Questions**
+1. Logging vs. monitoring — what's the difference?
+2. What is a correlation ID, and where should it appear?
+3. How would you debug a production API issue reported by one user?
+
+**Strong Interview Answers**
+- *How would you debug a one-user production issue?* Start from whatever
+  identifying information the user can provide — ideally a request/
+  correlation ID surfaced in the error they saw, which maps directly to a
+  structured log line with full context (timestamp, route, user id if
+  available, the actual error). Without an ID, fall back to narrowing by
+  timestamp range, user identity, and route — much slower and less certain.
+
+**Project Example**
+`server/src/middleware/requestLogger.ts` assigns a request id (echoed on
+`x-request-id`); `errorHandler.ts` includes that same id in every JSON
+error body; `index.ts` handles `SIGTERM`/`SIGINT` for graceful shutdown
+and `uncaughtException`/`unhandledRejection` as a last-resort safety net.
+
+**Mini Exercise**
+Trigger a `500` locally (e.g. temporarily throw inside a controller),
+note the `requestId` in the JSON response, and find the matching log line
+by searching the server's stdout for that exact id.
+
+---
+
 ## S. HTML + CSS
 
 **Development Tips**

@@ -10,6 +10,7 @@ interface ErrorBody {
     code: string;
     message: string;
     details?: unknown;
+    requestId?: string;
   };
 }
 
@@ -81,6 +82,11 @@ function toErrorBody(err: unknown): { status: number; body: ErrorBody } {
 // must stay even though it is unused.
 export function errorHandler(err: unknown, req: Request, res: Response, _next: NextFunction): void {
   const { status, body } = toErrorBody(err);
+  // pino-http (see requestLogger.ts) assigns req.id per request and echoes
+  // it on the x-request-id response header; including it in the error body
+  // too means a user reporting "I got error X" can hand over one id that
+  // pinpoints the exact log line, no timestamp/description matching needed.
+  body.error.requestId = req.id ? String(req.id) : undefined;
 
   if (status >= 500) {
     logger.error({ err, path: req.originalUrl, method: req.method }, 'Unhandled error');

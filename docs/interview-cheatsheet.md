@@ -99,6 +99,18 @@ For a wide Q&A bank see [interview-question-bank.md](interview-question-bank.md)
   deliberately doesn't expose (e.g. promoting a role) — keep them isolated,
   well-commented, and never imported by application code.
 
+## Logging + Observability / Reliability
+
+- **Graceful shutdown**: handle `SIGTERM`, stop accepting new connections
+  (`server.close()`), let in-flight requests finish, disconnect the
+  database, exit — always with a force-exit timer as a backstop.
+- **Process safety nets**: `uncaughtException`/`unhandledRejection` log and
+  exit — never try to keep running once state is unknown; let the
+  orchestrator restart cleanly.
+- **Correlation/request ID**: one id per request, present in logs, the
+  `x-request-id` response header, and (here) the JSON error body — the
+  fastest path from "user reports an error" to "the exact log line."
+
 ## Git
 
 - **`git status`** before anything destructive.

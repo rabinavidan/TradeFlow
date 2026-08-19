@@ -326,6 +326,30 @@ explicitly awaited via their observable result.
 **Follow-up Question:** Would this bug have been caught by a unit or
 component test instead? Why or why not?
 
+## Reliability
+
+### Question: Why does this app handle SIGTERM instead of just letting the process die when stopped?
+**Short Answer:** To finish in-flight requests and release resources
+cleanly instead of severing connections mid-response.
+**Strong Answer:** Every container orchestrator (Docker, Kubernetes) and
+most deploy tools send `SIGTERM` first when stopping a process, giving it
+a grace period before escalating to an unavoidable `SIGKILL`. If the app
+ignores `SIGTERM`, the default Node.js behavior is to exit immediately —
+cutting off any request currently mid-flight (a client gets a connection
+reset instead of a response) and skipping any cleanup (like closing the
+database connection cleanly). Handling `SIGTERM` explicitly lets the app
+stop accepting *new* connections via `server.close()`, wait for requests
+already in progress to finish, disconnect from MongoDB, and only then
+exit — turning what would be a hard cutoff into a clean handoff. A
+force-exit timer backs this up in case something in that cleanup sequence
+itself hangs.
+**Project Example:** `server/src/index.ts`'s `registerGracefulShutdown`.
+**Common Mistake:** Assuming this doesn't matter "because it works
+locally" — you rarely `Ctrl+C` mid-request in development, so the gap is
+invisible until it's costing dropped requests on every production deploy.
+**Follow-up Question:** What would you add to make in-flight WebSocket
+connections (not just HTTP requests) shut down gracefully too?
+
 ## Git
 
 ### Question: What belongs in `.gitignore` for a full-stack Node/React project?

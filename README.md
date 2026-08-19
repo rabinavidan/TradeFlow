@@ -9,11 +9,11 @@ admins act on them under role-based permissions.
 This is a technical portfolio project. It does not model real financial
 regulation.
 
-> **Status:** Phase 6 complete — the full application (auth, trade CRUD,
-> reviewer workflow, analytics) plus a full test suite: 37 server tests,
-> 20 client tests, and an 8-scenario Playwright E2E suite (POM) covering
-> register/login, full CRUD, search/filter, the reviewer workflow, and
-> unauthorized-access blocking. See
+> **Status:** Phase 7 complete — the full application, a full test suite
+> (37 server + 20 client + 8 E2E), and production-reliability basics:
+> graceful shutdown on SIGTERM, process-level crash safety nets, and a
+> correlation id threaded through logs, response headers, and error
+> bodies. See
 > [docs/learning-notes.md](docs/learning-notes.md) for phase-by-phase
 > progress and [docs](docs) for the full learning material.
 
