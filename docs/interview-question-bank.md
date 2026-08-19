@@ -203,6 +203,32 @@ efficiently serve a query that filters by `createdBy` alone, with no sort?
 What about a query that sorts by `createdAt` alone, with no `createdBy`
 filter?
 
+## TanStack Query
+
+### Question: When would a mutation's `onSuccess` call `setQueryData` instead of `invalidateQueries`, and when would it call `invalidateQueries` instead?
+**Short Answer:** `setQueryData` when the response is the complete fresh
+value for a specific cache key; `invalidateQueries` when it isn't.
+**Strong Answer:** A mutation's response often *is* exactly what a specific
+query would return — e.g. `PUT /trades/:id` returns the full updated trade,
+which is precisely what `useTradeQuery(id)` wants. In that case,
+`setQueryData(['trades', 'detail', id], trade)` updates the UI instantly
+with zero extra network round-trip. But the *list* query
+(`['trades', 'list', params]`) is filtered, sorted, and paginated — the
+mutation response can't tell you whether the updated trade still belongs on
+the currently-viewed page, or where it should sort. Rather than trying to
+patch that query's cache by hand, `invalidateQueries({ queryKey: ['trades', 'list'] })`
+marks it stale and lets TanStack Query refetch it correctly from the
+server.
+**Project Example:** `client/src/hooks/useTrades.ts`'s
+`useUpdateTradeMutation` does both: `setQueryData` for the detail view,
+`invalidateQueries` for the list.
+**Common Mistake:** Always reaching for `invalidateQueries` everywhere
+"to be safe," even for data you already have in hand — costing an
+unnecessary extra request and a brief loading flicker.
+**Follow-up Question:** What would go wrong if `setQueryData` were used for
+the *list* query instead of `invalidateQueries`, after an edit changes a
+trade's status such that it no longer matches the list's active status filter?
+
 ## Git
 
 ### Question: What belongs in `.gitignore` for a full-stack Node/React project?

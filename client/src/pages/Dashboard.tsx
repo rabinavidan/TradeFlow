@@ -1,11 +1,12 @@
+import { Link } from 'react-router-dom';
 import { useAuth } from '../hooks/useAuth';
 
 /**
- * Placeholder for Phase 1 — proves the protected route + auth flow works.
- * Replaced with real stats/recent-requests in Phase 5 (Analytics).
+ * Placeholder for Phases 1-3 — proves the protected route + auth flow
+ * works. Replaced with real stats/recent-requests in Phase 5 (Analytics).
  */
 export function Dashboard() {
-  const { user, logout } = useAuth();
+  const { user } = useAuth();
 
   return (
     <main className="page">
@@ -14,9 +15,11 @@ export function Dashboard() {
         Signed in as <strong>{user?.name}</strong> ({user?.email}) — role:{' '}
         <strong>{user?.role}</strong>
       </p>
-      <button type="button" onClick={logout}>
-        Log out
-      </button>
+      <p>
+        <Link to="/trades" className="btn">
+          View trade requests
+        </Link>
+      </p>
     </main>
   );
 }

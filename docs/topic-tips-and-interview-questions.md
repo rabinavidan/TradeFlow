@@ -543,6 +543,96 @@ in one sentence why curl to the same endpoint still works fine.
 
 ---
 
+## S. HTML + CSS
+
+**Development Tips**
+- Use semantic elements (`<nav>`, `<main>`, `<table>`, `<dl>`/`<dt>`/`<dd>`)
+  instead of generic `<div>`s wherever the content has real structure.
+- Prefer Flexbox for one-dimensional layouts (a nav bar, a button row) and
+  Grid for two-dimensional ones (the trade details' label/value grid).
+- Use `rem`/relative units and `max-width` + `overflow-x: auto` on wide
+  content (tables) instead of letting the whole page scroll horizontally.
+
+**Common Mistakes**
+- Reaching for a `<div>` + a pile of custom ARIA attributes when a native
+  element (`<table>`, `<button>`, `<select>`) already provides the right
+  semantics and keyboard behavior for free.
+- Fixed pixel widths that don't adapt to a phone-sized viewport.
+
+**Debugging Tips**
+- Browser DevTools' responsive/device toolbar catches layout breakage at
+  common breakpoints before a real device does.
+- If a table overflows the page instead of scrolling within itself, check
+  for a missing `overflow-x: auto` wrapper.
+
+**Interview Questions**
+1. Flexbox vs. Grid — when would you pick one over the other?
+2. Why use `<table>` for tabular data instead of styled `<div>`s?
+3. What is the box model?
+
+**Strong Interview Answers**
+- *Flexbox vs. Grid?* Flexbox distributes items along a single axis (a row
+  or a column) and is ideal when content size should drive layout (a nav
+  bar, a button group). Grid defines both rows and columns explicitly and
+  suits layouts with real two-dimensional structure (a details page's
+  label/value pairs, a dashboard of cards).
+
+**Project Example**
+`.app-header` uses Flexbox for the nav bar; `.detail-list` uses
+`grid-template-columns: max-content 1fr` for the trade details' label/value
+layout; `.trade-table-wrapper` uses `overflow-x: auto` so a wide table
+scrolls within itself on small screens.
+
+**Mini Exercise**
+Resize the browser to a phone width and confirm the trade list's filter row
+wraps sensibly (it uses `flex-wrap: wrap`) instead of overflowing.
+
+---
+
+## T. Accessibility
+
+**Development Tips**
+- Every input needs an associated `<label for="...">` — a placeholder is
+  not a label.
+- Use `aria-invalid` and `aria-describedby` to connect an input to its
+  error message for assistive tech, not just visual proximity.
+- Prefer native interactive elements (`<button>`, `<select>`, `<a>`) over
+  `<div onClick>` — you get keyboard support and correct semantics for free.
+
+**Common Mistakes**
+- A validation error that only changes text color, with no `role="alert"`
+  or `aria-describedby` link back to the field.
+- Icon-only buttons with no accessible label at all.
+
+**Debugging Tips**
+- Tab through a page with only the keyboard — every interactive element
+  should be reachable and show a visible focus state.
+- Browser DevTools' Accessibility tree/Lighthouse audit surfaces missing
+  labels and contrast issues automatically.
+
+**Interview Questions**
+1. Why is a placeholder not a substitute for a label?
+2. What does `aria-describedby` do?
+3. Why prefer a native `<button>` over a styled `<div>` with an `onClick`?
+
+**Strong Interview Answers**
+- *Why isn't a placeholder a label?* A placeholder disappears the moment the
+  user types, isn't reliably announced by every screen reader the same way
+  a label is, and fails as a persistent field description for users who
+  need it — e.g. someone who looks away mid-form. A `<label for="id">`
+  stays visible and is programmatically associated with the input.
+
+**Project Example**
+`FormField` renders `<label htmlFor={name}>` plus `aria-invalid` and
+`aria-describedby` pointing at a `role="alert"` error paragraph — used
+identically by the auth forms and `TradeForm`.
+
+**Mini Exercise**
+Tab through the Register page using only the keyboard and confirm you can
+reach and submit the form without ever touching the mouse.
+
+---
+
 ## M. Git
 
 **Development Tips**

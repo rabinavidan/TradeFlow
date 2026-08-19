@@ -108,6 +108,25 @@ For a wide Q&A bank see [interview-question-bank.md](interview-question-bank.md)
   (e.g. the user returned from a successful login) instead of invalidating
   and re-fetching.
 
+## React Router (layout routes)
+
+- A **layout route** (an element with no `path`, wrapping children via
+  `<Outlet/>`) composes with other layout routes — `ProtectedRoute` (auth
+  gate) wraps `Layout` (nav chrome) wraps the actual pages, each concern
+  isolated and independently testable.
+
+## TanStack Query (mutations)
+
+- **`setQueryData` vs. `invalidateQueries`**: use `setQueryData` when the
+  mutation's response *is* the fresh data for a specific cache entry (e.g.
+  updating one trade's detail). Use `invalidateQueries` when the mutation
+  only partially describes the effect on a broader query (e.g. a list that's
+  filtered/sorted/paginated — the mutation response doesn't tell you whether
+  the changed record still belongs on the current page).
+- **`placeholderData: (previous) => previous`**: keeps the last successful
+  result on screen (marked via `isPlaceholderData`) while a new page/filter
+  loads, instead of flashing a loading state on every change.
+
 ## Forms + Zod
 
 - Client and server both validate — the server copy

@@ -570,3 +570,188 @@ refresh token pattern so privilege changes take effect promptly.
 **MINI CODING EXERCISE**
 Add a `minAmount`/`maxAmount` query filter to `listTradesQuerySchema` and
 `listTrades`, following the same pattern as `status`/`requestType`.
+
+---
+
+## Phase 3 — React UI
+
+### What we built
+
+- `components/Layout.tsx` — the authenticated shell (top nav + `<Outlet/>`),
+  separated from `ProtectedRoute` (auth *gate*) on purpose: one component
+  decides "can you be here," the other decides "what does 'here' look like."
+- `components/TradeForm.tsx` — one form, shared by `CreateTrade` and
+  `EditTrade` via props (`defaultValues`, `onSubmit`, `submitLabel`), instead
+  of two near-identical copies.
+- `components/StatusBadge.tsx`, `components/Pagination.tsx` — small, focused,
+  reusable presentational components.
+- `hooks/useTrades.ts` — `useTradesQuery`, `useTradeQuery`,
+  `useCreateTradeMutation`, `useUpdateTradeMutation`, `useDeleteTradeMutation`:
+  every trade-related server interaction goes through TanStack Query, with
+  mutations invalidating (`list`) or directly seeding (`detail`) the cache.
+- `hooks/useDebouncedValue.ts` — a tiny custom hook so the search box doesn't
+  fire a request on every keystroke.
+- `pages/TradeList.tsx` — pagination, status/type filters, debounced search,
+  and explicit loading/empty/error states (not just "spinner or nothing").
+- `pages/CreateTrade.tsx`, `pages/EditTrade.tsx`, `pages/TradeDetails.tsx` —
+  the full CRUD loop from the UI, with ownership/editable-status logic
+  mirrored from the backend to decide whether Edit/Delete are even shown.
+- New client component tests (`TradeList.test.tsx`, `TradeForm.test.tsx`)
+  covering loading/empty/error states, debounced search, and form validation
+  + normalization.
+
+### Concepts learned
+
+**Layout routes vs. guard routes.** `ProtectedRoute` and `Layout` are both
+"wrapper" components rendering `<Outlet/>`, but they answer different
+questions: is the user allowed here at all (auth), vs. what chrome (nav,
+header) wraps every authenticated page (presentation). Nesting them
+(`<ProtectedRoute><Layout><actual pages/></Layout></ProtectedRoute>`) keeps
+each one simple and independently testable.
+
+**One form, two pages.** `TradeForm` doesn't know or care whether it's
+creating or editing — it just takes `defaultValues` and an `onSubmit`
+callback. `CreateTrade` and `EditTrade` differ only in *what* they do with
+the submitted values (POST vs. PUT) and where they navigate afterward. This
+is composition over duplication: change a validation rule once, and both
+flows pick it up.
+
+**`placeholderData: (previous) => previous`.** Without it, changing a page
+number or filter shows a jarring loading flash between "page 1's data" and
+"page 2's data." With it, TanStack Query keeps rendering the *previous*
+result while the new one loads in the background — this project dims it
+slightly (`opacity: isPlaceholderData ? 0.6 : 1`) so it's still obvious a
+fetch is in flight.
+
+**Mirroring backend authorization in the UI is a UX nicety, not security.**
+`TradeDetails` computes `canEdit` client-side (ownership + editable status)
+purely to decide whether to *show* Edit/Delete buttons — a user could still
+hit the API directly. The actual enforcement is still 100% the backend's
+`trade.service.ts` checks from Phase 2; hiding the buttons just avoids
+showing a user a button that would 403 if clicked.
+
+### Important code
+
+```tsx
+// client/src/hooks/useTrades.ts — mutation seeds/invalidates the right cache
+export function useUpdateTradeMutation(id: string) {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (payload) => updateTradeRequest(id, payload),
+    onSuccess: (trade) => {
+      queryClient.setQueryData(['trades', 'detail', id], trade); // instant
+      queryClient.invalidateQueries({ queryKey: ['trades', 'list'] }); // eventually consistent
+    },
+  });
+}
+```
+
+```tsx
+// client/src/components/TradeForm.tsx — one schema/component, two callers
+<TradeForm defaultValues={trade} onSubmit={handleSubmit} submitLabel="Save changes" />
+```
+
+### Important commands
+
+```bash
+npm run dev:client   # http://localhost:5173/trades
+npm run test --workspace client
+```
+
+### Problems solved
+
+No new bugs this phase beyond test-authoring mistakes (documented as part
+of the "problems solved" pattern anyway, since they're genuinely
+instructive):
+
+**Test mistake:** A component test asserted
+`expect(onSubmit).toHaveBeenCalledWith(expect.objectContaining({...}))` and
+failed even though the printed "received" values looked identical to what
+was expected.
+**Root cause:** React Hook Form's `handleSubmit(onSubmit)` calls
+`onSubmit(values, event)` with **two** arguments, not one — the
+`SyntheticEvent` is passed along as the second argument.
+`toHaveBeenCalledWith` checks the *entire* argument list, so a single
+matcher for a two-argument call always fails, regardless of how well that
+one matcher matches the first argument.
+**Fix:** Assert on `onSubmit.mock.calls[0][0]` directly with `.toEqual(...)`
+instead of `toHaveBeenCalledWith(...)`, when you only care about one
+argument out of several.
+**Prevention:** When a mock assertion fails but the diff *looks* like it
+should pass, check the actual argument count/shape
+(`mock.calls[0]`) before assuming the values themselves are wrong.
+
+### Interview questions
+
+1. **Why separate `ProtectedRoute` (auth gate) from `Layout` (page chrome)
+   instead of one combined wrapper?** — Single responsibility: one decides
+   "allowed here," the other decides "what surrounds the page." Testable and
+   reusable independently (e.g. a future public page could reuse `Layout`'s
+   nav without the auth requirement).
+2. **Why does `TradeForm` accept `onSubmit` as a prop instead of calling the
+   create/update API directly?** — Keeps the form itself dumb/reusable;
+   `CreateTrade` and `EditTrade` own the decision of *which* API call to make
+   and where to navigate afterward — a classic "lift the side effect up"
+   pattern.
+3. **What does `queryClient.setQueryData` buy you over just calling
+   `invalidateQueries` after every mutation?** — Instant UI update with data
+   you already have in hand (no extra round-trip) for the exact record you
+   just changed, while still invalidating the *list* query (which the
+   mutation response doesn't fully describe — you don't know if the updated
+   record still matches the list's current filters/sort).
+
+### What I should remember
+
+- A form component that only knows about `defaultValues` + `onSubmit` can be
+  reused for both create and edit — don't build two forms.
+- `placeholderData` (formerly `keepPreviousData` in React Query v4) is the
+  fix for pagination/filter loading flicker.
+- Client-side permission checks control what's *shown*; server-side checks
+  control what's *allowed*. Never confuse the two, and never skip the latter.
+- Mock assertion failures that "look right" in the diff often mean an
+  argument-count mismatch, not a value mismatch — check `mock.calls` directly.
+
+---
+
+### Phase 3 review
+
+**TOP 5 THINGS TO REMEMBER**
+1. Separate the "can you be here" gate from the "what does here look like"
+   layout — two different concerns, two different components.
+2. One shared form component + a prop for the submit behavior beats two
+   near-duplicate forms.
+3. `placeholderData` keeps stale data on screen during a refetch instead of
+   flashing a loading state on every page/filter change.
+4. Debounce search input — don't fire a network request per keystroke.
+5. Client-side permission checks are UX, not security; the server remains
+   the actual enforcement point.
+
+**TOP 5 INTERVIEW QUESTIONS**
+1. Why does this app separate ProtectedRoute from Layout?
+2. How is one TradeForm reused for both create and edit?
+3. What problem does `placeholderData` solve?
+4. Why debounce a search input, and what would happen without it?
+5. Why does a mutation's `onSuccess` sometimes call `setQueryData` and
+   sometimes `invalidateQueries` — why not always the same one?
+
+**TOP 3 DEVELOPMENT TIPS**
+1. Build reusable presentational components (`StatusBadge`, `Pagination`)
+   the moment you notice a second place that would need the same markup —
+   not before, not much after.
+2. Give every list view three real states beyond "has data": loading,
+   empty, and error — each with its own visible feedback, not a blank screen.
+3. When wrapping a mutation, decide deliberately: does the response fully
+   replace what a query already has (→ `setQueryData`), or does it only
+   partially describe what changed (→ `invalidateQueries`)?
+
+**TOP 3 COMMON MISTAKES**
+1. Writing near-identical Create and Edit forms instead of one shared,
+   prop-driven component.
+2. Letting a list re-fetch on every keystroke in a search box instead of
+   debouncing.
+3. Assuming a mock assertion diff that "looks equal" must be a false
+   failure, instead of checking the actual call signature.
+
+**MINI CODING EXERCISE**
+Add a `sortBy` dropdown to `TradeList` (Title / Amount / Created date) wired
+to the existing `useTradesQuery` params — the backend already supports it.
