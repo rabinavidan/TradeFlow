@@ -76,6 +76,12 @@ For a wide Q&A bank see [interview-question-bank.md](interview-question-bank.md)
 - **`toJSON` transform**: a schema-level transform turns Mongoose's internal
   `_id`/`__v` into a clean `id` field on every serialized response, instead
   of hand-mapping every field in every controller.
+- **`$facet` (aggregation)**: runs multiple sub-pipelines against the same
+  `$match`ed set of documents in one round trip — used for the dashboard's
+  total count + status breakdown + recent list, instead of three queries.
+- **Derived vs. stored data**: this project computes dashboard stats fresh
+  on every request rather than maintaining a running counter — no
+  stored/actual drift is possible, and it's cheap at this data scale.
 
 ## Git
 

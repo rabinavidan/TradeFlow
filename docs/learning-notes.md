@@ -951,3 +951,149 @@ sequentially was the simpler, more honest fix.
 Add a `Rejected → Draft` transition (allowing the owner to revise and
 resubmit a rejected request) to both `TRANSITIONS` tables, plus a test
 confirming the owner — and only the owner — can perform it.
+
+---
+
+## Phase 5 — Analytics
+
+### What we built
+
+- `services/analytics.service.ts` — `getAnalyticsSummary` runs **one**
+  MongoDB aggregation with `$facet` to compute three independent results
+  from the same filtered set of documents in a single round trip: a total
+  count, a count grouped by status, and the 5 most recent requests.
+- `GET /api/analytics/summary` — reuses the same visibility rule as the
+  trade list (`canSeeAllTrades`): a plain user's dashboard reflects only
+  their own requests; a reviewer/admin sees totals across everyone.
+- `pages/Dashboard.tsx` — replaced the Phase 1 placeholder with real stat
+  cards (total + one per status) and a "recent requests" list linking into
+  the details page.
+- 5 new integration tests (auth requirement, per-role scoping, counts
+  reacting to a status change, zero-state) and 2 new Dashboard component
+  tests (populated state, empty state).
+
+### Concepts learned
+
+**`$facet`: one query, several derived views.** Without `$facet`, getting a
+total count, a status breakdown, and a recent list would mean three
+separate queries (`countDocuments`, an `aggregate` with `$group`, and a
+`find().sort().limit()`) — three round trips to MongoDB for what's
+conceptually one "give me the dashboard data" request. `$facet` runs
+multiple sub-pipelines against the *same* `$match`ed input document set in
+a single aggregation call, so all three shapes come back together.
+
+**Derived data vs. stored data.** Nothing about "total requests" or "counts
+by status" is stored anywhere — it's *computed* from the same
+`TradeRequest` collection the rest of the app already writes to, on every
+request. This avoids an entire category of bugs (a stored counter drifting
+out of sync with reality) at the cost of a slightly heavier read — an
+entirely reasonable tradeoff at this data scale, and the same compound
+indexes from Phase 2 (`{ createdBy, createdAt }`, `{ status, createdAt }`)
+still help the `$match` stage here.
+
+**Consistent authorization across features.** The analytics endpoint
+reuses `canSeeAllTrades` from `trade.service.ts` instead of re-implementing
+"who can see what" — the *same* rule that scopes the trade list also scopes
+the dashboard, so there's no risk of the two disagreeing about what a plain
+user is allowed to see in aggregate versus in the list.
+
+### Important code
+
+```ts
+// server/src/services/analytics.service.ts — three views, one round trip
+const [result] = await TradeRequest.aggregate([
+  { $match: matchStage },
+  {
+    $facet: {
+      totalCount: [{ $count: 'count' }],
+      byStatus: [{ $group: { _id: '$status', count: { $sum: 1 } } }],
+      recent: [{ $sort: { createdAt: -1 } }, { $limit: 5 }, { $project: { /* ... */ } }],
+    },
+  },
+]);
+```
+
+### Important commands
+
+```bash
+curl http://localhost:4000/api/analytics/summary -H "Authorization: Bearer <token>"
+```
+
+### Problems solved
+
+No new bugs this phase — the aggregation pipeline worked as designed on the
+first pass, which is itself worth noting: building the `$facet` query
+incrementally (first `$match` + `totalCount` alone, verified against a known
+seed, then adding `byStatus`, then `recent`) rather than writing the whole
+pipeline blind made it easy to be confident about the final shape.
+
+### Interview questions
+
+1. **Why use `$facet` instead of three separate queries?** — One round trip
+   to the database instead of three, and all three results are guaranteed
+   to reflect the exact same snapshot of data (no risk of a write landing
+   between separate queries and making the count and the list disagree).
+2. **Why doesn't this project store a running total instead of computing it
+   on every dashboard load?** — A computed value can never drift from
+   reality; a cached/stored counter can, if any write path forgets to update
+   it. At this data scale, computing it fresh is cheap and correct.
+3. **Why does `getAnalyticsSummary` call the same `canSeeAllTrades` helper
+   as the trade list, instead of writing its own role check?** — Consistency:
+   one function is the single source of truth for "who can see all trades
+   vs. just their own," used everywhere that distinction matters.
+
+### What I should remember
+
+- `$facet` is the right tool when you need several *different shapes* of
+  derived data from the same filtered document set in one request.
+- Prefer computing derived/aggregate data over storing and incrementally
+  maintaining it, unless the computation becomes a measured performance
+  problem — premature caching invites drift bugs for no proven benefit.
+- Reuse authorization helpers across features instead of re-deriving the
+  same rule in more than one place.
+
+---
+
+### Phase 5 review
+
+**TOP 5 THINGS TO REMEMBER**
+1. `$facet` computes multiple derived views from one filtered pipeline in a
+   single database round trip.
+2. Prefer deriving aggregate data on read over maintaining a stored counter.
+3. Reuse the same authorization helper everywhere a rule applies — don't
+   let two endpoints quietly diverge on "who can see what."
+4. Build aggregation pipelines incrementally, verifying each stage against
+   known data before adding the next.
+5. The same compound indexes that serve a list endpoint's queries typically
+   also serve that same data's aggregations.
+
+**TOP 5 INTERVIEW QUESTIONS**
+1. What problem does `$facet` solve versus running separate queries?
+2. When would you choose a stored/cached counter over computing a value on
+   every read?
+3. What's the risk of a stored aggregate value that isn't kept in sync?
+4. Why reuse the same `canSeeAllTrades` helper for both the trade list and
+   the analytics endpoint?
+5. How would you test that an aggregation pipeline is using an index rather
+   than a full collection scan?
+
+**TOP 3 DEVELOPMENT TIPS**
+1. Build a `$facet` pipeline one sub-pipeline at a time against known seed
+   data, rather than writing the whole thing and debugging blind.
+2. Give derived/read-only endpoints the same authorization scoping as the
+   underlying data they summarize — don't let a "just for the dashboard"
+   endpoint quietly skip a rule the rest of the API enforces.
+3. Keep the response shape typed end-to-end (server interface → client
+   type) so a field rename doesn't silently break the UI.
+
+**TOP 3 COMMON MISTAKES**
+1. Running N separate queries for a dashboard when one `$facet` aggregation
+   would return everything consistently in one round trip.
+2. Storing and incrementally maintaining a counter "for performance" before
+   there's any evidence computing it fresh is actually too slow.
+3. Re-implementing an authorization rule per endpoint instead of extracting
+   and reusing it.
+
+**MINI CODING EXERCISE**
+Add an `averageAmount` field to the analytics summary using `$avg` inside
+the existing `$facet`, and surface it as a new stat card on the dashboard.

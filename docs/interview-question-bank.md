@@ -229,6 +229,28 @@ unnecessary extra request and a brief loading flicker.
 the *list* query instead of `invalidateQueries`, after an edit changes a
 trade's status such that it no longer matches the list's active status filter?
 
+## MongoDB (aggregation)
+
+### Question: What problem does `$facet` solve, and why not just run three separate queries for a dashboard?
+**Short Answer:** One round trip instead of three, with a guaranteed
+consistent snapshot.
+**Strong Answer:** A dashboard needing a total count, a breakdown by
+status, and a recent-items list could run three independent queries
+(`countDocuments`, an aggregation with `$group`, and a sorted/limited
+`find`). That works, but costs three round trips to the database and opens
+a small window where a write could land between them, making the count and
+the list technically inconsistent with each other. `$facet` runs multiple
+named sub-pipelines against the exact same `$match`-filtered input set in a
+single aggregation call, so `totalCount`, `byStatus`, and `recent` are
+guaranteed to reflect the same underlying snapshot, in one request.
+**Project Example:** `server/src/services/analytics.service.ts`'s
+`getAnalyticsSummary` — one aggregation, one `$match` stage, three facets.
+**Common Mistake:** Reaching for `$facet` even when the "views" don't
+actually need to share the same filtered input — if they're genuinely
+independent, separate queries can be simpler and more parallelizable.
+**Follow-up Question:** What's a downside of `$facet` compared to separate
+queries, especially as the input document set gets large?
+
 ## Testing
 
 ### Question: Why did adding a third server test file break a previously-passing test in a different file, with no code change to that test?

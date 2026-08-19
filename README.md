@@ -9,9 +9,10 @@ admins act on them under role-based permissions.
 This is a technical portfolio project. It does not model real financial
 regulation.
 
-> **Status:** Phase 4 complete — project scaffold, JWT authentication, the
-> Trade Request backend and full CRUD UI, plus the reviewer workflow
-> (role-gated status transitions with an append-only audit history). See
+> **Status:** Phase 5 complete — project scaffold, JWT authentication, the
+> Trade Request backend and full CRUD UI, the reviewer workflow (RBAC +
+> audit history), and a real analytics dashboard (MongoDB `$facet`
+> aggregation for totals, status breakdown, and recent requests). See
 > [docs/learning-notes.md](docs/learning-notes.md) for phase-by-phase
 > progress and [docs](docs) for the full learning material.
 
