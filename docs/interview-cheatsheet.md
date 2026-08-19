@@ -152,6 +152,22 @@ For a wide Q&A bank see [interview-question-bank.md](interview-question-bank.md)
   visibility, but isn't treated as a required status check, since it's the
   slowest and most environment-sensitive layer of the test pyramid.
 
+## Optional AI (Ollama)
+
+- **Fully optional**: the app works identically with or without Ollama
+  installed — `OLLAMA_BASE_URL`/`OLLAMA_MODEL` have defaults, nothing at
+  startup depends on Ollama being reachable.
+- **One failure shape**: every way the call to Ollama can fail (connection
+  refused, timeout, bad status, empty response) is normalized into a single
+  `503 AI_UNAVAILABLE` `AppError` — the client only ever handles one case.
+- **Timeout even for localhost**: `AbortController` bounds the call — a
+  hung local process shouldn't be able to hang an API request forever.
+- **Form default vs. API "optional" bug**: a real bug found here — an
+  untouched numeric field's default (`amount: 0`) isn't the same as "not
+  provided" to a Zod `.optional().positive()` field; the client now
+  explicitly converts default-ish form values to `undefined` before
+  building the AI request payload.
+
 ## Authentication
 
 - **bcrypt** hashes passwords with a random salt baked into the output and

@@ -115,3 +115,15 @@ curl -X PUT http://localhost:4000/api/trades/<id> -H "Authorization: Bearer <tok
   -H "Content-Type: application/json" -d '{"title":"Updated title"}'
 curl -X DELETE http://localhost:4000/api/trades/<id> -H "Authorization: Bearer <token>"
 ```
+
+## Optional AI (Phase 10)
+
+```bash
+# one-time local setup — the app works fully without this
+ollama pull llama3.2
+ollama serve
+
+curl -X POST http://localhost:4000/api/ai/generate-description \
+  -H "Authorization: Bearer <token>" -H "Content-Type: application/json" \
+  -d '{"title":"Import shipment financing","country":"Germany","requestType":"Letter of Credit"}'
+```

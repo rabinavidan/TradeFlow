@@ -450,6 +450,64 @@ about the value of the coverage itself.
 **Follow-up Question:** What would you need to add to this project's E2E
 suite before you'd be comfortable making it a required check?
 
+## Optional AI (Ollama)
+
+### Question: Clicking "Generate with AI" on a freshly opened create-trade form (only the Title field filled in) returned a 422 with "Request data failed validation" instead of the expected 503 AI_UNAVAILABLE. What was actually going on?
+**Short Answer:** The request never reached Ollama at all — it failed the
+server's own Zod validation first, because the form sent default values
+(`amount: 0`, `currency: ''`) that the schema didn't accept as "not
+provided."
+**Strong Answer:** `useForm`'s default values give an untouched `amount`
+field a real value of `0`, not `undefined`. The button's handler was
+reading `getValues()` and passing those values straight through to the AI
+endpoint. Server-side, `generateDescriptionSchema` declares
+`amount: z.coerce.number().positive().optional()` — `.optional()` permits
+the *key* to be missing, but `0` is present and fails `.positive()`
+immediately, well before the request handler ever calls the Ollama
+service. The status code (`422`, Express's generic Zod-validation
+response) was the tell: a `503` would only appear once the code actually
+attempted (and failed) to reach Ollama, so a `422` meant the failure was
+earlier, in request validation. The fix converts each default-ish value to
+`undefined` before building the payload
+(`amount > 0 ? amount : undefined`, `currency || undefined`, `country ||
+undefined`), so an untouched field is genuinely omitted rather than sent
+as a value that was always going to fail validation.
+**Project Example:** `client/src/components/TradeForm.tsx`'s
+`handleGenerateDescription`.
+**Common Mistake:** Assuming a UI form library's notion of "empty" (a
+default value like `0` or `''`) automatically matches an API schema's
+notion of "optional" (the key being absent) — they only match if something
+explicitly reconciles them.
+**Follow-up Question:** Would using `z.coerce.number().optional()` without
+`.positive()` have hidden this bug instead of surfacing it? What would
+that have cost?
+
+### Question: Why does this project's AI endpoint convert every possible failure (connection refused, timeout, non-OK HTTP status, empty model response) into the same 503 AI_UNAVAILABLE error, instead of returning different errors for each case?
+**Short Answer:** The client only needs to know one thing — "AI generation
+isn't available right now" — regardless of which underlying failure caused
+it; a single, stable error contract is easier to build reliable UI around
+than a growing list of failure-specific codes for a best-effort feature.
+**Strong Answer:** This endpoint is explicitly optional and best-effort:
+the UI's only meaningful response to *any* failure is "show a small notice
+and let the user write the description manually" — there's no different
+UI behavior for "Ollama isn't running" versus "Ollama timed out" versus
+"the model returned nothing." Collapsing every failure mode into one
+`AppError.serviceUnavailable('AI_UNAVAILABLE', ...)` keeps the service's
+public contract small and stable: the client's error handling doesn't need
+to change if a new internal failure mode is added later (say, a JSON parse
+error), because it was never branching on the specific cause to begin
+with. The original, specific error is still logged server-side
+(`logger.warn({ err }, ...)`) for anyone debugging *why* Ollama was
+unreachable — that detail just isn't part of the client-facing contract.
+**Project Example:** `server/src/services/ai.service.ts`'s single
+`catch` block around the entire Ollama call.
+**Common Mistake:** Designing an error contract with as many specific
+codes as failure modes "for completeness," when the caller only ever
+needs to make one decision regardless of which one occurred.
+**Follow-up Question:** Would this reasoning still hold for a *required*
+(non-optional) external dependency, where the caller might need to react
+differently to "temporarily down" versus "permanently misconfigured"?
+
 ### Question: Why run `lint-and-typecheck`, `server-tests`, and `client-tests` as three separate parallel CI jobs instead of one job running all three commands in sequence?
 **Short Answer:** Faster feedback (they run concurrently) and clearer
 failure isolation (each job's status shows exactly which category failed).

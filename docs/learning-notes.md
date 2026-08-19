@@ -1886,3 +1886,228 @@ Add a `docker` job to `ci.yml` that runs `docker compose build` (no need
 to run the containers) — verifying the Dockerfiles themselves stay
 buildable as the codebase changes, not just that the app builds outside
 a container.
+
+---
+
+## Phase 10 — Optional AI feature (Ollama)
+
+### What we built
+
+An optional "Generate with AI" button on the trade request form. It calls
+a new `POST /api/ai/generate-description` endpoint, which asks a locally
+running [Ollama](https://ollama.com) model to draft a short trade-finance
+description from whatever fields are already filled in (title, customer,
+amount/currency, country, request type). If Ollama isn't installed or
+running, the endpoint fails predictably (`503 AI_UNAVAILABLE`) and the UI
+shows an inline notice instead of crashing or blocking the rest of the
+form — the entire feature is additive, never required.
+
+### Concepts learned
+
+- **Optional dependency, not a required one**: the app must fully work
+  with Ollama absent — no startup check, no required env var, no crash
+  path. `env.ts` gives `OLLAMA_BASE_URL`/`OLLAMA_MODEL` defaults so the
+  app boots identically whether or not Ollama exists on the machine.
+- **Timeouts on outbound calls**: any call to a service you don't control
+  (even a local one) needs a bounded wait — `AbortController` + `setTimeout`
+  here, so a hung Ollama process can't hang an API request indefinitely.
+  For a *connection refused* the wait is essentially instant (Node/the OS
+  reject unopened ports right away); the timeout budget exists for the
+  slower, less obvious failure modes (Ollama running but the wrong model,
+  or a machine so loaded a real generate call never finishes) — `fetch`
+  doesn't wait forever on those on its own.
+- **Translate the failure, don't leak it**: the raw fetch error (a
+  connection refused, a timeout, a bad status) never reaches the client —
+  the service catches every failure mode and re-throws one stable,
+  documented `AppError` (`503 AI_UNAVAILABLE`) so the frontend only ever
+  has to handle a single, predictable shape.
+- **Best-effort mutation, not a blocking dependency**: the client's
+  `useGenerateDescriptionMutation` has no `onSuccess` cache side effects
+  and no `retry` — it either fills a field or shows a small notice; it
+  never disables the rest of the form or the submit button.
+- **Sending exactly what the server expects**: a `useForm` default value
+  (`amount: 0`, `currency: ''`) is a valid *form* state but not
+  necessarily a valid *API payload* — a field that's still at its default
+  needs to be treated as "not provided," not passed through literally.
+
+### Important code
+
+`server/src/services/ai.service.ts` — builds the prompt, calls Ollama's
+`/api/generate` with `stream: false`, and converts every failure mode
+(network error, timeout, non-OK status, empty response) into one
+`AppError.serviceUnavailable('AI_UNAVAILABLE', ...)`:
+
+```ts
+export async function generateDescription(input: GenerateDescriptionInput): Promise<string> {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
+  try {
+    const res = await fetch(`${env.OLLAMA_BASE_URL}/api/generate`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ model: env.OLLAMA_MODEL, prompt: buildPrompt(input), stream: false }),
+      signal: controller.signal,
+    });
+    if (!res.ok) throw new Error(`Ollama responded with status ${res.status}`);
+    const data = (await res.json()) as { response: string };
+    const description = data.response?.trim();
+    if (!description) throw new Error('Ollama returned an empty response');
+    return description;
+  } catch (err) {
+    logger.warn({ err }, 'AI description generation unavailable');
+    throw AppError.serviceUnavailable('AI_UNAVAILABLE', '...');
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+```
+
+`client/src/components/TradeForm.tsx` — omits fields still at their form
+default before calling the mutation, so the payload matches what the
+server actually validates:
+
+```ts
+generateDescription.mutate({
+  title,
+  customerName: customerName || undefined,
+  amount: amount > 0 ? amount : undefined,
+  currency: currency || undefined,
+  country: country || undefined,
+  requestType,
+});
+```
+
+### Important commands
+
+```bash
+# Optional local setup — the app works fully without this
+ollama pull llama3.2
+ollama serve
+
+curl -X POST http://localhost:4000/api/ai/generate-description \
+  -H "Authorization: Bearer <token>" -H "Content-Type: application/json" \
+  -d '{"title":"Import shipment financing","country":"Germany","requestType":"Letter of Credit"}'
+```
+
+### Problems solved
+
+**The bug**: clicking "Generate with AI" on a freshly opened create-trade
+form (only the Title field filled in) returned a `422` — not the expected
+`503 AI_UNAVAILABLE` — and the inline notice read "Request data failed
+validation" instead of the intended "AI unavailable" message.
+
+*What I thought first*: that Ollama simply wasn't reachable in this
+environment (true) and the `503` path just hadn't been hit yet.
+
+*Hint*: the status code was `422`, not `503` — that number means the
+request never even reached the Ollama call. Where does a `422` come from
+in this codebase, and what does that imply about *when* the failure
+happened?
+
+*Root cause*: `getValues()` returns the form's actual current values,
+including untouched fields still at their `useForm` defaults —
+`amount: 0`, `currency: ''`, `country: ''`. The mutation payload passed
+those values through literally. Server-side, `generateDescriptionSchema`
+declares `amount: z.coerce.number().positive().optional()` — `optional()`
+allows `amount` to be *missing*, but `0` is present and fails `.positive()`.
+An untouched number field's "empty" state (`0`) and Zod's "not provided"
+concept (`undefined`) aren't the same thing, and nothing was reconciling
+them before the request left the browser.
+
+*The fix*: convert each default-ish value to `undefined` before building
+the mutation payload (`amount > 0 ? amount : undefined`, `currency ||
+undefined`, `country || undefined`) — see the code above.
+
+*How it was found*: caught during a real browser smoke test (registering,
+opening the create-trade form, filling only Title, clicking the button) —
+the actual response body's `error.code` was `VALIDATION_ERROR`/`422`,
+which pointed straight at Zod parsing rather than the Ollama call.
+
+*Prevention*: whenever a form library's "empty" default and an API
+schema's "optional" meaning might not line up (`0` vs. missing, `''` vs.
+missing), normalize explicitly at the boundary where the payload is
+built — don't assume `getValues()` is already shaped like a valid partial
+API request.
+
+### Interview questions
+
+1. Why does this endpoint return `503`, not `500`, when Ollama can't be
+   reached?
+2. Why translate every failure mode into one generic `AI_UNAVAILABLE`
+   error instead of surfacing the underlying network/timeout error to the
+   client?
+3. Why is a request timeout still worth adding for a *local* service call,
+   not just a remote one?
+4. What's the difference between a form field being "empty" and an API
+   field being "not provided," and why did that distinction matter here?
+
+### What I should remember
+
+- Treat any optional integration as something the app must work *without*
+  by default — no required config, no startup dependency, one clearly
+  documented failure path.
+- Always put a timeout on an outbound call to a process you don't fully
+  control, even one running on `localhost`.
+- A form's default values are a valid UI state but not automatically a
+  valid API payload — reconcile the two explicitly where the request is
+  built, not by hoping they already match.
+- A real browser smoke test found a bug two full test suites (Vitest unit/
+  integration on both sides) didn't, because both suites' AI tests
+  supplied deliberately "clean" payloads — a reminder that unit tests are
+  only as good as the inputs they choose to exercise.
+
+---
+
+### Phase 10 review
+
+**TOP 5 THINGS TO REMEMBER**
+1. An optional feature must leave the app in an identical, fully working
+   state whether or not the optional dependency exists.
+2. Convert every raw failure from an external call into one stable,
+   documented error shape — never let a raw network/timeout error reach
+   the client.
+3. Bound every outbound network call with a timeout, even to `localhost`.
+4. A UI form's "empty" default and an API schema's "optional" field are
+   two different concepts — reconcile them explicitly when building a
+   request payload.
+5. Manual browser testing catches a class of bug (real, unfiltered user
+   input) that unit tests with hand-picked fixtures can miss entirely.
+
+**TOP 5 INTERVIEW QUESTIONS**
+1. How would you design a feature that depends on an optional local
+   service, so the app is unaffected when that service is absent?
+2. What's the tradeoff of catching every possible failure mode into one
+   generic error code, versus preserving more detail for the client?
+3. Why add a timeout to a call to a service running on the same machine?
+4. Describe a bug you found where two different systems' definitions of
+   "empty" or "optional" didn't match — how did you find it, and how did
+   you fix it?
+5. Why does this project cap the AI endpoint's request body validation
+   with `.optional()` fields rather than requiring the full trade schema?
+
+**TOP 3 DEVELOPMENT TIPS**
+1. Design optional integrations to fail into a known, handled state — not
+   as an afterthought once you notice they can fail.
+2. Keep an optional feature's mutation state fully separate from the
+   form's own submit state — a failed AI call should never block or taint
+   the rest of the form.
+3. Smoke-test a new feature in a real browser with realistic, imperfect
+   input (an empty field, a zero default) — not just the happy path a unit
+   test fixture assumes.
+
+**TOP 3 COMMON MISTAKES**
+1. Assuming a `useForm` default value is equivalent to "the user didn't
+   provide this" when building an API payload — it isn't, until you make
+   it so explicitly.
+2. Letting a third-party/local service's raw error reach the client
+   instead of normalizing it into the app's own error contract.
+3. Skipping a timeout on an outbound call because "it's just localhost" —
+   local services hang too.
+
+**MINI CODING EXERCISE**
+Add a small in-memory cache (keyed by the generated prompt string, a few
+minutes' TTL) in front of `generateDescription` so identical repeated
+requests (e.g. a user clicking "Generate with AI" twice without changing
+any fields) don't re-hit Ollama — and explain, in a comment, why this
+cache should live entirely in the service layer and never affect the
+route/controller's error-handling contract.

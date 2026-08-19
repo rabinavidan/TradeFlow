@@ -1,13 +1,18 @@
 import { describe, expect, it, vi } from 'vitest';
-import { render, screen, waitFor } from '@testing-library/react';
+import { screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { TradeForm } from '../components/TradeForm';
+import { renderWithProviders } from './testUtils';
+import * as aiApi from '../api/ai.api';
+
+vi.mock('../api/ai.api');
+const mockedAiApi = vi.mocked(aiApi);
 
 describe('<TradeForm />', () => {
   it('shows validation errors and does not call onSubmit for an empty form', async () => {
     const onSubmit = vi.fn();
     const user = userEvent.setup();
-    render(<TradeForm onSubmit={onSubmit} submitLabel="Create request" />);
+    renderWithProviders(<TradeForm onSubmit={onSubmit} submitLabel="Create request" />);
 
     await user.click(screen.getByRole('button', { name: /create request/i }));
 
@@ -18,7 +23,7 @@ describe('<TradeForm />', () => {
   it('normalizes and submits valid input', async () => {
     const onSubmit = vi.fn();
     const user = userEvent.setup();
-    render(<TradeForm onSubmit={onSubmit} submitLabel="Create request" />);
+    renderWithProviders(<TradeForm onSubmit={onSubmit} submitLabel="Create request" />);
 
     await user.type(screen.getByLabelText(/title/i), 'Import shipment financing');
     await user.type(screen.getByLabelText(/customer name/i), 'Acme Corp');
@@ -43,5 +48,30 @@ describe('<TradeForm />', () => {
         requestType: 'Letter of Credit',
       }),
     );
+  });
+
+  it('fills the description field when AI generation succeeds', async () => {
+    mockedAiApi.generateTradeDescription.mockResolvedValue('An AI-drafted description.');
+    const user = userEvent.setup();
+    renderWithProviders(<TradeForm onSubmit={vi.fn()} submitLabel="Create request" />);
+
+    await user.type(screen.getByLabelText(/title/i), 'Import shipment financing');
+    await user.click(screen.getByRole('button', { name: /generate with ai/i }));
+
+    expect(await screen.findByDisplayValue('An AI-drafted description.')).toBeInTheDocument();
+    expect(mockedAiApi.generateTradeDescription).toHaveBeenCalledWith(
+      expect.objectContaining({ title: 'Import shipment financing' }),
+    );
+  });
+
+  it('shows an inline notice instead of crashing when AI generation is unavailable', async () => {
+    mockedAiApi.generateTradeDescription.mockRejectedValue(new Error('AI unavailable'));
+    const user = userEvent.setup();
+    renderWithProviders(<TradeForm onSubmit={vi.fn()} submitLabel="Create request" />);
+
+    await user.type(screen.getByLabelText(/title/i), 'Import shipment financing');
+    await user.click(screen.getByRole('button', { name: /generate with ai/i }));
+
+    expect(await screen.findByRole('status')).toHaveTextContent(/unavailable/i);
   });
 });

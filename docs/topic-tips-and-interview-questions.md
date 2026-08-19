@@ -968,3 +968,69 @@ a stale in-progress run whenever a new commit supersedes it.
 Deliberately break `npm run typecheck` locally (introduce a type error),
 confirm it fails, then fix it and re-run — this is exactly the check CI's
 `lint-and-typecheck` job would have caught before merge, just run by hand.
+
+---
+
+## R. Optional AI Integration (Ollama)
+
+**Development Tips**
+- Design an optional integration so the app is fully functional with it
+  absent — no required env var, no startup dependency, one predictable
+  failure path.
+- Give config for an optional service sensible defaults (`OLLAMA_BASE_URL`,
+  `OLLAMA_MODEL`) rather than making them required — the app should boot
+  identically whether or not the service exists on the machine.
+- Bound every outbound call to an external (even local) process with a
+  timeout (`AbortController` + `setTimeout`) — never let a hung dependency
+  hang your own request indefinitely.
+- Translate every failure mode (connection refused, timeout, bad status,
+  malformed response) into one stable, documented error the client can
+  handle generically, instead of leaking the raw underlying error.
+
+**Common Mistakes**
+- Treating a `useForm` field's default value (`0`, `''`) as equivalent to
+  "not provided" when building an API request payload — a schema's
+  `.optional()` only tolerates a field being *absent*, not present with a
+  default/empty value that fails its own validation (e.g. `.positive()`
+  rejecting `0`).
+- Letting an optional feature's failure state block or disable the rest of
+  an otherwise-working form.
+- Skipping a timeout because a service happens to run on `localhost` — a
+  local process can hang or misbehave just as easily as a remote one.
+
+**Debugging Tips**
+- If a call to an optional integration fails unexpectedly, check the
+  response status/code first — a `422` (validation) and a `503`
+  (unreachable service) point to two completely different places in the
+  code, and confusing them wastes time debugging the wrong layer.
+- Test the "service absent" path deliberately (don't have Ollama running)
+  — it's the default state for anyone cloning the repo, so it needs to be
+  a normal, tested path, not just an assumption.
+
+**Interview Questions**
+1. How would you design a feature around an optional local/external
+   dependency so its absence never breaks the app?
+2. Why put a timeout on a call to a service running on the same machine?
+3. Why convert every failure mode from an external call into one generic
+   error code instead of passing the raw error through?
+
+**Strong Interview Answers**
+- *How do you design around an optional dependency?* Give it sensible
+  defaults so the app never requires it to boot; wrap every call to it in
+  error handling that converts any failure (unreachable, slow, malformed
+  response) into one predictable, documented outcome; and keep that
+  feature's failure state fully isolated from the rest of the UI/API so a
+  missing integration degrades one feature, not the whole app.
+
+**Project Example**
+`server/src/services/ai.service.ts`'s `generateDescription` wraps a call to
+a local Ollama instance with an `AbortController` timeout and converts
+every failure into `AppError.serviceUnavailable('AI_UNAVAILABLE', ...)`;
+`TradeForm.tsx`'s "Generate with AI" button shows an inline notice on
+failure without touching the rest of the form or its submit button.
+
+**Mini Exercise**
+With Ollama not running, click "Generate with AI" on the create-trade form
+and confirm you get a clear inline message (not a crash, not a silent
+no-op) — then start Ollama (`ollama serve` with a model pulled) and try
+again to see the success path.

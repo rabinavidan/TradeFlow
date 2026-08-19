@@ -9,6 +9,7 @@ import { healthRouter } from './routes/health.routes.js';
 import { authRouter } from './routes/auth.routes.js';
 import { tradeRouter } from './routes/trade.routes.js';
 import { analyticsRouter } from './routes/analytics.routes.js';
+import { aiRouter } from './routes/ai.routes.js';
 
 export function createApp(): Express {
   const app = express();
@@ -28,6 +29,7 @@ export function createApp(): Express {
   app.use('/api/auth', authRouter);
   app.use('/api/trades', tradeRouter);
   app.use('/api/analytics', analyticsRouter);
+  app.use('/api/ai', aiRouter);
 
   app.use(notFoundHandler);
   app.use(errorHandler);

@@ -9,11 +9,12 @@ admins act on them under role-based permissions.
 This is a technical portfolio project. It does not model real financial
 regulation.
 
-> **Status:** Phase 9 complete — the full application, a full test suite
-> (37 server + 20 client + 8 E2E), production-reliability basics, a full
+> **Status:** Phase 10 complete — the full application, a full test suite
+> (42 server + 22 client + 8 E2E), production-reliability basics, a full
 > Docker setup (`docker compose up --build` runs client + server + MongoDB
-> together), and a GitHub Actions CI pipeline (lint, typecheck, build, unit/
-> integration tests, and E2E, in parallel jobs on every PR). See
+> together), a GitHub Actions CI pipeline (lint, typecheck, build, unit/
+> integration tests, and E2E, in parallel jobs on every PR), and an optional
+> AI-assisted description generator backed by a local Ollama model. See
 > [docs/learning-notes.md](docs/learning-notes.md) for phase-by-phase
 > progress and [docs](docs) for the full learning material.
 
@@ -66,6 +67,9 @@ cp client/.env.example client/.env
 
 Edit `server/.env` if your MongoDB instance isn't at the default
 `mongodb://localhost:27017/tradeflow-lite`, and set a real `JWT_SECRET`.
+`OLLAMA_BASE_URL`/`OLLAMA_MODEL` are optional — only needed for the
+"Generate with AI" description button (see below); the app works fully
+without them.
 
 ### 3. Run the app
 
@@ -102,6 +106,21 @@ docker compose up --build
 Set `JWT_SECRET` in a root `.env` file (see `.env.example`) to override the
 demo default. `docker compose down -v` stops everything and removes the
 MongoDB volume.
+
+## Optional: AI-assisted description generation
+
+The trade request form has a "Generate with AI" button that drafts a
+description from whatever fields are already filled in, using a locally
+running [Ollama](https://ollama.com) model — no paid API, no account, no
+data leaving your machine.
+
+```bash
+ollama pull llama3.2   # or set OLLAMA_MODEL to whatever you've pulled
+ollama serve
+```
+
+This is entirely optional: with Ollama not running, the button shows a
+small inline notice and the rest of the form works identically.
 
 ## Quick health check
 

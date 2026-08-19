@@ -3,6 +3,8 @@ import { zodResolver } from '@hookform/resolvers/zod';
 import { tradeFormSchema, type TradeFormValues } from '../schemas/trade.schema';
 import { TRADE_REQUEST_TYPES } from '../types/trade';
 import { FormField } from './FormField';
+import { useGenerateDescriptionMutation } from '../hooks/useAi';
+import { getApiErrorMessage } from '../api/client';
 
 interface TradeFormProps {
   defaultValues?: Partial<TradeFormValues>;
@@ -29,11 +31,37 @@ export function TradeForm({ defaultValues, onSubmit, submitLabel, apiError }: Tr
   const {
     register,
     handleSubmit,
+    getValues,
+    setValue,
     formState: { errors, isSubmitting },
   } = useForm<TradeFormValues>({
     resolver: zodResolver(tradeFormSchema),
     defaultValues: { ...EMPTY_DEFAULTS, ...defaultValues },
   });
+
+  const generateDescription = useGenerateDescriptionMutation();
+
+  // Optional AI convenience feature (Phase 10): drafts a description from
+  // whatever fields are already filled in. Best-effort — if Ollama isn't
+  // running locally, the mutation fails and we just show an inline notice;
+  // the rest of the form works identically either way.
+  function handleGenerateDescription() {
+    const { title, customerName, amount, currency, country, requestType } = getValues();
+    if (!title || title.trim().length < 3) {
+      return;
+    }
+    generateDescription.mutate(
+      {
+        title,
+        customerName: customerName || undefined,
+        amount: amount > 0 ? amount : undefined,
+        currency: currency || undefined,
+        country: country || undefined,
+        requestType,
+      },
+      { onSuccess: (description) => setValue('description', description, { shouldValidate: true }) },
+    );
+  }
 
   return (
     <form className="trade-form" onSubmit={handleSubmit(onSubmit)} noValidate>
@@ -86,11 +114,29 @@ export function TradeForm({ defaultValues, onSubmit, submitLabel, apiError }: Tr
       </div>
 
       <div className="form-field">
-        <label htmlFor="description">Description</label>
+        <div className="form-field-label-row">
+          <label htmlFor="description">Description</label>
+          <button
+            type="button"
+            className="ai-generate-button"
+            onClick={handleGenerateDescription}
+            disabled={generateDescription.isPending}
+          >
+            {generateDescription.isPending ? 'Generating…' : 'Generate with AI'}
+          </button>
+        </div>
         <textarea id="description" rows={4} {...register('description')} />
         {errors.description && (
           <p className="form-field-error" role="alert">
             {errors.description.message}
+          </p>
+        )}
+        {generateDescription.isError && (
+          <p className="form-field-hint" role="status">
+            {getApiErrorMessage(
+              generateDescription.error,
+              'AI description generation is unavailable right now — write one manually.',
+            )}
           </p>
         )}
       </div>
