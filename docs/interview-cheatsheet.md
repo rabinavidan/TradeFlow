@@ -35,9 +35,33 @@ For a wide Q&A bank see [interview-question-bank.md](interview-question-bank.md)
 
 ## REST
 
-- **Status codes used so far**: `200` (health OK), `503` (health degraded —
-  DB down). More codes (`201`, `204`, `400`, `401`, `403`, `404`, `409`,
-  `422`) are introduced with the endpoints that use them in later phases.
+- **Status codes used so far**: `200` OK, `201` created (`POST /trades`),
+  `204` no content (`DELETE /trades/:id` — nothing to return), `400` bad
+  request (malformed `:id`), `401` unauthorized (no/invalid token), `403`
+  forbidden (valid token, not allowed), `404` not found, `409` conflict (the
+  resource's *state* blocks the action — editing a non-Draft trade), `422`
+  unprocessable entity (request body fails Zod validation), `503` health
+  degraded (DB down).
+- **`403` vs `404`**: this project uses `403` when a resource exists but the
+  caller isn't allowed to see/touch it (clearer for teaching purposes); some
+  real systems deliberately return `404` instead, to avoid confirming the
+  resource exists at all.
+- **`409` vs `422`**: `422` = the request body itself is invalid (bad shape,
+  wrong types). `409` = the request is well-formed, but the resource's
+  *current state* makes it impossible (e.g. trying to edit an `Approved`
+  trade request).
+
+## MongoDB
+
+- **Indexes are designed around real queries**: `{ createdBy: 1, createdAt: -1 }`
+  for "my requests, newest first"; `{ status: 1, createdAt: -1 }` for a
+  reviewer's queue; a text index on `title`/`customerName` for search.
+- **Pagination**: `skip((page - 1) * limit).limit(limit)`, run alongside
+  `countDocuments(filter)` with `Promise.all` — using the *same* filter
+  object for both keeps the returned page and the reported total consistent.
+- **`toJSON` transform**: a schema-level transform turns Mongoose's internal
+  `_id`/`__v` into a clean `id` field on every serialized response, instead
+  of hand-mapping every field in every controller.
 
 ## Git
 

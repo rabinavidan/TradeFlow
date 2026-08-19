@@ -333,6 +333,107 @@ correlated with a specific server log line.
 
 ---
 
+## I. REST API Design
+
+**Development Tips**
+- Design around resources (`/trades`, `/trades/:id`), not actions
+  (`/getTradeById`) — let the HTTP verb carry the action.
+- Support pagination on every list endpoint from day one; retrofitting it
+  once clients depend on unpaginated responses is painful.
+- Keep the error contract identical across every endpoint
+  (`{ error: { code, message } }`) so frontend error handling is generic.
+- Scope authorization at the query level, not by filtering an unscoped
+  result set after the fact.
+
+**Common Mistakes**
+- Returning `200` for everything, including creates (`201`) and deletes with
+  no body (`204`) — status codes are part of the API contract, not decoration.
+- Building a list endpoint without pagination "for now," which becomes a
+  breaking change to fix later.
+- Mixing `403` and `404` inconsistently across endpoints in the same API.
+
+**Debugging Tips**
+- When an endpoint returns the wrong data for the wrong user, check the
+  *query filter* first — it's the most common place authorization silently
+  breaks (an unscoped `find({})` instead of `find({ createdBy })`).
+- A `422` with `error.details` (from `err.flatten()`) tells you exactly
+  which field failed Zod validation and why — read it before guessing.
+
+**Interview Questions**
+1. Why does `POST /trades` return `201`, not `200`?
+2. Why does `DELETE /trades/:id` return `204` with an empty body?
+3. When would you choose `403` over `404` for an authorization failure?
+
+**Strong Interview Answers**
+- *Why 201 for POST?* `200 OK` says "here's the result of your request";
+  `201 Created` more precisely says "a new resource now exists" — and
+  conventionally the response body is the resource that was created, which
+  is exactly what `create` returns here.
+
+**Project Example**
+`server/src/controllers/trade.controller.ts`: `create` → `201`, `list`/`getOne`/`update` → `200`, `remove` → `204` with `res.status(204).send()` (no body).
+
+**Mini Exercise**
+Add a `PATCH /api/trades/:id/status` route stub (no logic yet — that's
+Phase 4) and explain in a comment why `PATCH` is the right verb here instead
+of `PUT`.
+
+---
+
+## J. MongoDB
+
+**Development Tips**
+- Design indexes for the queries you actually run — `{ createdBy: 1, createdAt: -1 }`
+  and `{ status: 1, createdAt: -1 }` here, not a blanket index on every field.
+- Use `Promise.all` for independent queries (`find` + `countDocuments`)
+  instead of sequential `await`s.
+- Prefer referencing (`createdBy: ObjectId`) over embedding for data that
+  has its own identity and lifecycle (a `User` isn't part of a `TradeRequest`).
+- Keep a `toJSON` transform on the schema for a consistent, clean API shape
+  instead of re-mapping fields in every controller.
+
+**Common Mistakes**
+- Adding an index for every field "just in case" — each index costs write
+  performance and storage; only add what a real query needs.
+- Passing a different filter to `find()` than to `countDocuments()`,
+  producing a `pagination.total` that doesn't match what pagination actually
+  returns.
+- Trusting a raw `req.params.id` without considering it might not be a valid
+  ObjectId — Mongoose throws a `CastError`, which needs to map to a `400`,
+  not leak as a `500`.
+
+**Debugging Tips**
+- `db.traderequests.getIndexes()` in `mongosh` shows what's actually
+  indexed; `.explain('executionStats')` on a query shows whether it used one.
+- A `CastError` (`This expression is not callable`... no — `Cast to ObjectId
+  failed`) means the ID string wasn't a valid 24-character hex ObjectId.
+
+**Interview Questions**
+1. How do you decide what to index?
+2. Embedding vs. referencing — how did you choose for `TradeRequest.createdBy`?
+3. How does this project implement pagination, and why keep the same filter
+   for `find()` and `countDocuments()`?
+
+**Strong Interview Answers**
+- *Embedding vs. referencing?* Embed data that's always accessed together
+  with its parent and doesn't have independent identity (e.g. an address
+  embedded in an order). Reference data with its own lifecycle, queried
+  independently, or shared across many parents — a `User` is referenced from
+  `TradeRequest.createdBy` because users are queried on their own (login,
+  profile) and one user is referenced by many trades.
+
+**Project Example**
+`server/src/models/TradeRequest.ts`'s two compound indexes match this
+project's two real access patterns exactly (a user's own list; a reviewer's
+status-filtered queue); the text index backs the search box.
+
+**Mini Exercise**
+Run `db.traderequests.find({ createdBy: ObjectId("...") }).sort({ createdAt: -1 }).explain('executionStats')`
+in `mongosh` against seeded data and confirm `totalDocsExamined` is close to
+`nReturned` (proof the index is actually being used, not a full collection scan).
+
+---
+
 ## K. Authentication + JWT
 
 **Development Tips**

@@ -87,3 +87,22 @@ curl -X POST http://localhost:4000/api/auth/login \
 # current user (needs a token from the responses above)
 curl http://localhost:4000/api/auth/me -H "Authorization: Bearer <token>"
 ```
+
+## Trades (Phase 2)
+
+```bash
+# create
+curl -X POST http://localhost:4000/api/trades \
+  -H "Authorization: Bearer <token>" -H "Content-Type: application/json" \
+  -d '{"title":"Import financing","customerName":"Acme","amount":25000,"currency":"usd","country":"Germany","requestType":"Letter of Credit"}'
+
+# list (paginated, filtered, searched)
+curl "http://localhost:4000/api/trades?page=1&limit=10&status=Draft&search=Acme" \
+  -H "Authorization: Bearer <token>"
+
+# get one / edit / delete
+curl http://localhost:4000/api/trades/<id> -H "Authorization: Bearer <token>"
+curl -X PUT http://localhost:4000/api/trades/<id> -H "Authorization: Bearer <token>" \
+  -H "Content-Type: application/json" -d '{"title":"Updated title"}'
+curl -X DELETE http://localhost:4000/api/trades/<id> -H "Authorization: Bearer <token>"
+```

@@ -150,6 +150,59 @@ it fine; the browser just hid the response from the page's JavaScript.
 **Follow-up Question:** Why does the CORS spec forbid combining a wildcard
 `origin: '*'` with `credentials: true`?
 
+## REST
+
+### Question: Why scope a MongoDB query for authorization instead of filtering an unscoped result in application code?
+**Short Answer:** Correctness (accurate pagination) and performance (less
+data fetched and transferred).
+**Strong Answer:** If you fetch all trade requests and then filter down to
+"only mine" in JavaScript, `countDocuments()` (used for `pagination.total`)
+and the actual returned page can disagree — the count reflects *all*
+documents while the filtered array reflects only some, or you have to
+duplicate the filtering logic in two places and hope they stay in sync.
+Worse, the unfiltered data leaves the database and crosses the network
+before being discarded, which is both slower and a bigger blast radius if
+the filtering step is ever buggy or skipped. Building the MongoDB filter
+object once and passing the *same* object to `find()` and
+`countDocuments()` keeps both paths correct by construction.
+**Project Example:** `server/src/services/trade.service.ts`'s `listTrades`
+builds one `filter` object (`{ createdBy: requester.sub }` for a plain
+user, `{}` for a reviewer/admin) and reuses it for both queries via
+`Promise.all`.
+**Common Mistake:** Fetching broadly and filtering "downstream" (in a
+controller, or in the frontend) because it felt simpler at the time, then
+discovering it doesn't scale or leaks data.
+**Follow-up Question:** How would this approach change if "my trades" also
+needed to include trades where the user was a *reviewer assigned to it*,
+not just the creator?
+
+## MongoDB
+
+### Question: How did this project decide what to index, and how would you verify an index is actually being used?
+**Short Answer:** Index for the queries you actually run; verify with
+`.explain()`.
+**Strong Answer:** Indexes aren't free — every index adds overhead to every
+write (insert/update must maintain it) and consumes storage, so the right
+approach is to look at the application's actual query patterns and index
+exactly those. This project has two real list views (a user's own requests,
+newest first; a reviewer's queue filtered by status, newest first), so it
+has exactly two compound indexes matching them:
+`{ createdBy: 1, createdAt: -1 }` and `{ status: 1, createdAt: -1 }`. To
+verify an index is used rather than a full collection scan, run the query
+with `.explain('executionStats')` in `mongosh` and check that
+`totalDocsExamined` is close to `nReturned` (a full scan would show
+`totalDocsExamined` close to the entire collection's size regardless of how
+few documents matched).
+**Project Example:** `server/src/models/TradeRequest.ts`'s two
+`tradeRequestSchema.index(...)` calls.
+**Common Mistake:** Adding an index to every field defensively, without
+checking whether any real query filters or sorts by it — this slows down
+every write for no benefit.
+**Follow-up Question:** Would `{ createdBy: 1, createdAt: -1 }` also
+efficiently serve a query that filters by `createdBy` alone, with no sort?
+What about a query that sorts by `createdAt` alone, with no `createdBy`
+filter?
+
 ## Git
 
 ### Question: What belongs in `.gitignore` for a full-stack Node/React project?

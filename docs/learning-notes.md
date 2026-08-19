@@ -379,3 +379,194 @@ the mistake.
 Add a `confirmPassword` field to the Register form (client-only — the
 server doesn't need it) using Zod's `.refine()` to assert it matches
 `password`, with the error attached to the `confirmPassword` field.
+
+---
+
+## Phase 2 — Trade Backend
+
+### What we built
+
+- `models/TradeRequest.ts` — title, customerName, amount, currency, country,
+  requestType (enum), description, status (enum, default `Draft`),
+  `createdBy` (ref `User`). Compound indexes for the two real query
+  patterns (`{ createdBy, createdAt }` for "my requests, newest first" and
+  `{ status, createdAt }` for a reviewer's queue), plus a text index on
+  `title`/`customerName` for search. A schema-level `toJSON` transform turns
+  Mongoose's `_id`/`__v` into a clean `id` field for every API response.
+- `schemas/trade.schema.ts` — `createTradeSchema` (strict), `updateTradeSchema`
+  (the same shape, `.partial()` — every field optional for `PUT`),
+  `listTradesQuerySchema` (page/limit/search/status/requestType/sortBy/sortOrder,
+  all with sane defaults via `z.coerce` since query strings arrive as text).
+- `services/trade.service.ts` — the actual business rules:
+  - **Visibility**: a plain `user` only ever sees their own trades; `reviewer`
+    and `admin` see everything. Enforced by scoping the MongoDB filter itself
+    (`{ createdBy: requester.sub }`), not by filtering results after the
+    fact — so pagination counts stay correct.
+  - **Ownership**: viewing/editing/deleting someone else's trade as a
+    non-privileged user is a `403`, not a silent empty result.
+  - **Editability**: only `Draft`/`Rejected` trades can be edited or deleted
+    by their owner (an `Approved` request shouldn't be quietly rewritten);
+    `admin` can override. This is a deliberately light guard — the *real*
+    status workflow (who can move a trade from `Submitted` to `In Review`,
+    etc.) is Phase 4's job.
+- Routes: `GET /api/trades` (list), `POST /api/trades` (create),
+  `GET/PUT/DELETE /api/trades/:id` — all behind `requireAuth`.
+- 12 new Supertest integration tests covering auth requirement, ownership
+  scoping (user vs. reviewer), pagination, search, status filtering,
+  validation errors, and the editability guard.
+
+### Concepts learned
+
+**Scoping the query, not the results.** `listTrades` builds a MongoDB
+`filter` object that already excludes other users' trades for a plain user
+— `TradeRequest.find(filter)` and `countDocuments(filter)` both use it. This
+is different (and much better) than fetching *all* trades and filtering them
+in JavaScript afterward: the database does the work, pagination totals stay
+accurate, and there's no risk of accidentally including a document in one
+step but not the other.
+
+**A JWT's role claim is a snapshot, not a live value.** While testing
+reviewer-only visibility, promoting a test user's DB role to `reviewer`
+*after* they'd already registered had no effect on their existing token —
+because the token's `role` claim was baked in at sign-time. The fix (in the
+test, and in reality) is to re-authenticate after a role change; there's no
+way for a previously-issued JWT to "notice" a later DB change without some
+form of token refresh or revocation list. This is a real, common gotcha with
+any stateless-token auth system, not just a test artifact.
+
+**`z.coerce` for query strings.** Every value in `req.query` arrives as a
+string (`"page=2"` → `"2"`, never the number `2`). `z.coerce.number()`
+converts-then-validates in one step, so `listTradesQuerySchema.parse(req.query)`
+can just be used directly instead of hand-parsing each param.
+
+**Editable-status guard vs. Phase 4's workflow.** It would have been
+tempting to build the full `Draft → Submitted → In Review → Approved/Rejected`
+state machine right now, but that's explicitly a separate concern (RBAC +
+audit history) — Phase 2 only needed "can this trade still be freely
+edited," which only needs to distinguish "still a draft/rejected" from
+"already in the pipeline."
+
+### Important code
+
+```ts
+// server/src/services/trade.service.ts — scope the query, don't filter after
+const filter: Record<string, unknown> = canSeeAllTrades(requester.role)
+  ? {}
+  : { createdBy: requester.sub };
+// ...filter.status, filter.$or for search...
+const [data, total] = await Promise.all([
+  TradeRequest.find(filter).sort(sort).skip(skip).limit(query.limit),
+  TradeRequest.countDocuments(filter),
+]);
+```
+
+```ts
+// server/src/schemas/trade.schema.ts — query strings need coercion
+export const listTradesQuerySchema = z.object({
+  page: z.coerce.number().int().min(1).default(1),
+  limit: z.coerce.number().int().min(1).max(100).default(10),
+  // ...
+});
+```
+
+### Important commands
+
+```bash
+# create (needs a Bearer token from /api/auth/login)
+curl -X POST http://localhost:4000/api/trades \
+  -H "Authorization: Bearer <token>" -H "Content-Type: application/json" \
+  -d '{"title":"Import financing","customerName":"Acme","amount":25000,"currency":"usd","country":"Germany","requestType":"Letter of Credit"}'
+
+# list, paginated + filtered + searched
+curl "http://localhost:4000/api/trades?page=1&limit=10&status=Draft&search=Acme" \
+  -H "Authorization: Bearer <token>"
+```
+
+### Problems solved
+
+**Bug (in the test, not the app):** A test expected a promoted `reviewer`
+user to see all trades, but got `0` back instead of `2`.
+**What I thought caused it (hint given first):** *Hint: when exactly does
+the JWT's `role` claim get decided — at sign-time, or read fresh from the
+database on every request?*
+**Root cause:** The test elevated the user's role in MongoDB directly
+(`User.findByIdAndUpdate(..., { role: 'reviewer' })`) but kept using the
+JWT issued *before* that update — which still carried `role: 'user'` in its
+payload, since `requireAuth` trusts the token's claims rather than looking
+the user up fresh on every request (a deliberate performance tradeoff of
+stateless JWTs).
+**Fix:** Re-login after the role change in the test helper, so the returned
+token actually carries the new role.
+**Prevention:** In a real app, changing a user's role would need to either
+force re-login (short token expiry) or use a shorter-lived access token +
+refresh token pattern so privilege changes take effect promptly.
+
+### Interview questions
+
+1. **Why scope the MongoDB query itself instead of fetching everything and
+   filtering in application code?** — Correctness (pagination totals stay
+   accurate) and performance (the database does far less work, and never
+   sends data the requester isn't allowed to see over the wire).
+2. **Why does promoting a user's role in the database not immediately
+   affect requests made with their existing token?** — A JWT's claims are
+   fixed at sign-time; the server doesn't re-check the database on every
+   request unless it's designed to (which defeats much of the point of a
+   stateless token).
+3. **Why return `403` for viewing someone else's trade instead of `404`?**
+   — This project chooses to teach the distinction clearly (the resource
+   exists, you're just not allowed); note some real systems deliberately use
+   `404` instead specifically to avoid confirming a resource exists at all.
+
+### What I should remember
+
+- Build MongoDB filters conditionally and pass the *same* filter object to
+  both `find()` and `countDocuments()` — never let pagination metadata and
+  actual results drift apart.
+- `z.coerce` converts before validating — essential for anything coming from
+  `req.query` (always strings) or `req.params`.
+- A `409 Conflict` fits "the resource exists, but its current state doesn't
+  allow this action" (like editing a non-Draft trade) — different from `422`
+  (the request body itself is invalid) or `403` (you're not allowed, period).
+
+---
+
+### Phase 2 review
+
+**TOP 5 THINGS TO REMEMBER**
+1. Scope database queries for authorization — don't fetch-then-filter.
+2. A JWT's claims are a snapshot; role/permission changes need a fresh token
+   to take effect.
+3. `z.coerce.number()` (etc.) handles the string→typed conversion that every
+   query-string parameter needs.
+4. Use `Promise.all` for independent async calls (`find` + `countDocuments`)
+   instead of awaiting them one after another.
+5. `409 Conflict` = valid request, wrong resource *state*; `422` = the
+   request body itself is invalid; `403` = not allowed regardless of state.
+
+**TOP 5 INTERVIEW QUESTIONS**
+1. Why scope a MongoDB query instead of filtering results in JS afterward?
+2. What happens to already-issued JWTs when you change a user's role in the DB?
+3. What's the difference between 403 and 404, and when would you pick one over the other?
+4. Why use `Promise.all` for `find()` + `countDocuments()` here?
+5. What does a compound MongoDB index like `{ createdBy: 1, createdAt: -1 }` optimize for?
+
+**TOP 3 DEVELOPMENT TIPS**
+1. Design indexes around the queries you actually run (owner + recency,
+   status + recency), not defensively on every field.
+2. Keep the Zod schema for `PUT` as `createSchema.partial()` instead of a
+   hand-duplicated schema — one source of truth for field rules.
+3. Write the "who can see/edit/delete this" rule as small service-level
+   helper functions (`canSeeAllTrades`, `isOwnerOrPrivileged`) so
+   controllers stay declarative and the rule is unit-testable on its own.
+
+**TOP 3 COMMON MISTAKES**
+1. Filtering "my data only" in application code after an unscoped DB query —
+   works until pagination totals or performance expose the mistake.
+2. Assuming a role change takes effect immediately for a user already holding
+   a valid JWT.
+3. Reaching for `404` and `403` interchangeably without a consistent rule
+   for which one a given endpoint should use.
+
+**MINI CODING EXERCISE**
+Add a `minAmount`/`maxAmount` query filter to `listTradesQuerySchema` and
+`listTrades`, following the same pattern as `status`/`requestType`.

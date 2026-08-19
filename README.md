@@ -9,8 +9,9 @@ admins act on them under role-based permissions.
 This is a technical portfolio project. It does not model real financial
 regulation.
 
-> **Status:** Phase 1 complete (project scaffold, health check, JWT
-> authentication with register/login/protected routes). See
+> **Status:** Phase 2 complete (project scaffold, JWT authentication, and
+> the Trade Request backend — CRUD, ownership/role-scoped visibility,
+> pagination, filtering, and search). See
 > [docs/learning-notes.md](docs/learning-notes.md) for phase-by-phase
 > progress and [docs](docs) for the full learning material.
 
