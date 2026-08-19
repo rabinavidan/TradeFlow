@@ -19,11 +19,14 @@ export default defineConfig({
     baseURL: CLIENT_URL,
     trace: 'retain-on-failure',
     screenshot: 'only-on-failure',
-    // Use the browser already installed in this environment instead of
-    // downloading one that matches @playwright/test's pinned revision.
-    launchOptions: {
-      executablePath: process.env.PLAYWRIGHT_CHROMIUM_PATH ?? '/opt/pw-browsers/chromium',
-    },
+    // Only override the browser path when explicitly told to (e.g. a dev
+    // sandbox with a pre-installed Chromium at a fixed, non-standard
+    // path). Leaving this unset elsewhere lets Playwright find the
+    // browser it manages itself — which is what a normal CI runner
+    // (after `playwright install`) and most local dev machines expect.
+    launchOptions: process.env.PLAYWRIGHT_CHROMIUM_PATH
+      ? { executablePath: process.env.PLAYWRIGHT_CHROMIUM_PATH }
+      : {},
   },
 
   projects: [

@@ -397,3 +397,78 @@ generated files.
 committing.
 **Follow-up Question:** If a secret was already committed and pushed, is
 adding it to `.gitignore` afterwards enough to remove it from the repo?
+
+## CI/CD
+
+### Question: Why did this project's Playwright config need to change before it could run reliably in CI, even though it already worked in the dev sandbox?
+**Short Answer:** It hardcoded a Chromium binary path that only exists in
+one specific local sandbox.
+**Strong Answer:** The original config unconditionally set
+`launchOptions.executablePath` to a fixed path
+(`/opt/pw-browsers/chromium`) that happened to exist in this particular dev
+environment. On a real GitHub Actions runner, no such path exists — Playwright
+manages its own browser install via `npx playwright install --with-deps
+chromium`, at a different, runner-managed location. Hardcoding the sandbox's
+path meant the config only worked by coincidence in one environment and
+would fail immediately anywhere else. The fix makes the override
+conditional: `executablePath` is only set when `PLAYWRIGHT_CHROMIUM_PATH` is
+explicitly provided via environment variable; otherwise Playwright is left
+to find its own managed browser, which is what both a normal CI runner and
+most local dev machines expect.
+**Project Example:** `e2e/playwright.config.ts`'s `use.launchOptions`.
+**Common Mistake:** Verifying something works in "your" environment and
+assuming that proves portability — a hardcoded path, port, or credential
+specific to one sandbox is an easy way to ship a config that silently only
+works for its author.
+**Follow-up Question:** What other parts of a Playwright/CI config are
+common places for environment-specific assumptions to sneak in (think
+ports, base URLs, timeouts)?
+
+### Question: Why isn't this project's Playwright E2E job wired as a required, merge-blocking status check, when the unit/integration test jobs are?
+**Short Answer:** E2E is the slowest and most environment-sensitive layer of
+the test pyramid — a flake there shouldn't itself block every merge the way
+a real regression in a fast, deterministic test should.
+**Strong Answer:** The test pyramid exists because different test layers
+have different cost/reliability tradeoffs: unit and integration tests are
+fast, deterministic, and isolate failures precisely, so treating them as
+required makes sense — a red one almost always means a real regression.
+E2E tests exercise the entire real system end-to-end (a real browser, real
+navigation, real async timing) and are, by nature, more prone to
+environment-specific flakiness that has nothing to do with the actual code
+change (a slow runner, a timing edge case). Running E2E on every PR still
+gives valuable visibility into UI regressions, but making it a hard merge
+gate risks blocking legitimate changes on noise instead of signal. A real
+UI regression is still very likely to be caught by client-side unit/
+component tests too, which *are* required.
+**Project Example:** `.github/workflows/ci.yml`'s `e2e` job runs on every
+PR and uploads a Playwright HTML report on failure, but branch protection
+(if configured) would name `lint-and-typecheck`, `server-tests`, and
+`client-tests` as required checks, not `e2e`.
+**Common Mistake:** Concluding "E2E tests are less important" from this
+decision — the actual reasoning is about *flake tolerance in a gate*, not
+about the value of the coverage itself.
+**Follow-up Question:** What would you need to add to this project's E2E
+suite before you'd be comfortable making it a required check?
+
+### Question: Why run `lint-and-typecheck`, `server-tests`, and `client-tests` as three separate parallel CI jobs instead of one job running all three commands in sequence?
+**Short Answer:** Faster feedback (they run concurrently) and clearer
+failure isolation (each job's status shows exactly which category failed).
+**Strong Answer:** These three checks are fully independent of each other —
+a lint failure has nothing to do with whether server tests pass. Running
+them as separate jobs lets GitHub Actions schedule them on separate runners
+concurrently, so total wall-clock time is roughly the slowest single job
+instead of the sum of all three. It also means a PR's checks list shows
+precisely which category is red at a glance, rather than one monolithic
+"CI" job whose failure could be any of several unrelated causes, requiring
+someone to open the log and scroll to find out which step actually failed.
+**Project Example:** `.github/workflows/ci.yml` defines
+`lint-and-typecheck`, `server-tests`, and `client-tests` as three top-level
+jobs with no `needs:` between them, so they start simultaneously; `build`
+only adds a real dependency (`needs: [lint-and-typecheck]`) where one
+actually exists.
+**Common Mistake:** Over-splitting jobs that *do* have a real dependency
+(e.g. running `build` before `lint-and-typecheck` finishes) just to
+maximize parallelism, wasting runner time building code that's about to
+fail a type check anyway.
+**Follow-up Question:** What tradeoff would you be making by merging all
+three jobs back into one sequential job on a single runner?

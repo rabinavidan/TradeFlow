@@ -9,11 +9,11 @@ admins act on them under role-based permissions.
 This is a technical portfolio project. It does not model real financial
 regulation.
 
-> **Status:** Phase 8 complete — the full application, a full test suite
-> (37 server + 20 client + 8 E2E), production-reliability basics, and a
-> full Docker setup (`docker compose up --build` runs client + server +
-> MongoDB together) — verified end-to-end in a real browser against the
-> containerized stack. See
+> **Status:** Phase 9 complete — the full application, a full test suite
+> (37 server + 20 client + 8 E2E), production-reliability basics, a full
+> Docker setup (`docker compose up --build` runs client + server + MongoDB
+> together), and a GitHub Actions CI pipeline (lint, typecheck, build, unit/
+> integration tests, and E2E, in parallel jobs on every PR). See
 > [docs/learning-notes.md](docs/learning-notes.md) for phase-by-phase
 > progress and [docs](docs) for the full learning material.
 

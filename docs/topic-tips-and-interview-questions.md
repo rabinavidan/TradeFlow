@@ -894,3 +894,77 @@ Run `docker images` after building and compare the reported size of
 `tradeflow-server` against what a single-stage Dockerfile (keeping
 TypeScript, dev dependencies, and source files in the final image) would
 produce — explain the difference in your own words.
+
+---
+
+## O. CI/CD
+
+**Development Tips**
+- Run the exact same commands locally that CI runs (`npm run lint`,
+  `npm run typecheck`, `npm run build`, `npm run test`) — CI should never be
+  the first place you discover a command is broken.
+- Give independent checks their own parallel jobs (lint, server tests,
+  client tests) instead of one long sequential job — faster feedback, and
+  one failure doesn't hide another.
+- Use `needs:` to express real dependencies only (e.g. `build` needs
+  `lint-and-typecheck` to pass first; `e2e` needs a working `build`) — don't
+  serialize jobs that could run independently.
+- Cancel a still-running workflow run for the same branch when a new commit
+  lands (`concurrency` + `cancel-in-progress: true`) instead of burning
+  runner time on a commit nobody cares about anymore.
+- Upload failure artifacts (a Playwright HTML report, screenshots, traces)
+  so a CI failure is debuggable without reproducing it locally first.
+
+**Common Mistakes**
+- Referencing an npm script in the workflow file that doesn't actually exist
+  (or exists under a different workspace) — always cross-check against each
+  `package.json` before trusting a YAML edit.
+- Hardcoding a path or browser binary location that only exists in one
+  specific dev sandbox, silently breaking on a real CI runner.
+- Treating E2E flakiness as a reason to make it a required, merge-blocking
+  check on every PR — E2E is valuable signal, but the slowest and most
+  environment-sensitive layer of the pyramid; a flake there shouldn't itself
+  block merges the way a real unit-test regression should.
+- Committing secrets into a workflow file instead of using repository
+  secrets/environment variables.
+
+**Debugging Tips**
+- Reproduce a CI-only failure locally with a *fresh* environment first
+  (`npm ci` from a clean clone, not your existing `node_modules`) — many "CI
+  is broken" bugs are actually "my local environment has stale/extra state
+  CI doesn't."
+- Read the failing step's exact command and exit code before guessing —
+  CI logs show precisely what ran and what it returned.
+- A workflow that "looks right" but never triggers usually has a mismatched
+  `on:` branch filter — confirm the branch names in `on.push`/`on.pull_request`
+  actually match the branch being used.
+
+**Interview Questions**
+1. What's the difference between Continuous Integration and Continuous
+   Deployment?
+2. Why run lint/test/build as separate parallel jobs instead of one script?
+3. What would you do differently for a check that's flaky vs. one that's
+   reliably catching real regressions?
+4. Why validate a CI workflow's commands locally before pushing it?
+
+**Strong Interview Answers**
+- *CI vs. CD?* Continuous Integration is about *verifying* every change
+  automatically — lint, type-check, test, build — the moment it's pushed, so
+  problems surface within minutes, not days later during a manual review.
+  Continuous Deployment (or Delivery) goes a step further and automatically
+  *ships* a change that passes those checks to a real environment. This
+  project only implements CI: every push/PR is verified, but nothing is
+  auto-deployed — appropriate for a portfolio app with no live production
+  target.
+
+**Project Example**
+`.github/workflows/ci.yml` runs `lint-and-typecheck`, `server-tests`, and
+`client-tests` in parallel; `build` depends on lint/typecheck passing first;
+`e2e` depends on a successful `build` and uploads the Playwright HTML report
+only `if: failure()`. A `concurrency` group keyed on the branch ref cancels
+a stale in-progress run whenever a new commit supersedes it.
+
+**Mini Exercise**
+Deliberately break `npm run typecheck` locally (introduce a type error),
+confirm it fails, then fix it and re-run — this is exactly the check CI's
+`lint-and-typecheck` job would have caught before merge, just run by hand.

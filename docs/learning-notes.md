@@ -1694,3 +1694,195 @@ assuming the Dockerfile itself is wrong.
 Add a `HEALTHCHECK` instruction to `server/Dockerfile` itself (curling
 `/api/health`), so `docker ps` reports the server container's health
 directly, independent of Compose's own healthcheck config.
+
+---
+
+## Phase 9 — CI/CD
+
+### What we built
+
+- `.github/workflows/ci.yml` — runs on every PR into `main` and every push
+  to `main`, with five jobs: `lint-and-typecheck`, `server-tests`,
+  `client-tests`, `build` (depends on lint passing first — no point
+  compiling code that doesn't even lint), and `e2e` (depends on `build`
+  passing). Each independent job (lint, server tests, client tests) runs
+  in parallel rather than one long serial job, so a lint failure and a
+  server test failure would both be visible immediately instead of one
+  hiding behind the other.
+- `concurrency` cancellation — pushing a new commit to an open PR cancels
+  that PR's still-running CI, instead of wasting runner time finishing a
+  run for code that's already been superseded.
+- Fixed a real portability bug found while writing this phase: **before**,
+  `e2e/playwright.config.ts` fell back to a hard-coded Chromium path
+  specific to *this development sandbox* whenever `PLAYWRIGHT_CHROMIUM_PATH`
+  wasn't set — which would have silently broken the E2E job on a real
+  GitHub Actions runner (no such path exists there). Fixed to only
+  override the browser path when explicitly asked to, letting Playwright
+  fall back to its own normal browser resolution everywhere else.
+
+### Concepts learned
+
+**A CI pipeline is a second, disinterested reviewer.** It runs the exact
+same commands a contributor could run locally (`npm run lint`, `npm run
+build`, ...) — but on every single PR, with no chance of "I forgot to run
+it" or "it worked on my machine." That's the entire value proposition: the
+same checks, guaranteed to actually happen, every time.
+
+**Parallel jobs vs. one long job.** Splitting lint/typecheck, server
+tests, and client tests into separate jobs means they run concurrently
+(faster feedback) and fail independently (a lint problem doesn't hide a
+test failure in the same log). `needs: [...]` expresses genuine
+dependencies — `build` needs code that at least lints; `e2e` needs code
+that actually builds — without forcing everything into one serial chain.
+
+**Environment-specific assumptions are exactly what portable code (and CI)
+protects against.** The Playwright config bug this phase found — a
+sandbox-specific path silently used as a "sensible default" — is a small,
+concrete example of the larger lesson from Phase 6's debugging: code that
+"just happens to work" because of an assumption true only in one
+environment is a bug waiting for a different environment (here: a real CI
+runner) to expose it.
+
+### Important code
+
+```yaml
+# .github/workflows/ci.yml — parallel jobs, explicit dependencies
+jobs:
+  lint-and-typecheck: { ... }
+  server-tests: { ... }        # runs in parallel with lint-and-typecheck
+  client-tests: { ... }        # runs in parallel with both of the above
+  build:
+    needs: [lint-and-typecheck]   # only build code that at least lints
+  e2e:
+    needs: [build]                 # only run E2E against code that builds
+```
+
+```ts
+// e2e/playwright.config.ts — the portability fix
+launchOptions: process.env.PLAYWRIGHT_CHROMIUM_PATH
+  ? { executablePath: process.env.PLAYWRIGHT_CHROMIUM_PATH }  // this sandbox only
+  : {},                                                          // everywhere else: Playwright's own default
+```
+
+### Important commands
+
+```bash
+# every command CI runs, runnable identically on a local machine
+npm ci
+npm run lint
+npm run typecheck
+npm run build --workspace server
+npm run build --workspace client
+npm run test --workspace server
+npm run test --workspace client
+npx playwright install --with-deps chromium   # CI only — real machines usually have this already
+npm run test:e2e
+```
+
+### Problems solved
+
+**Bug:** `e2e/playwright.config.ts` had
+`executablePath: process.env.PLAYWRIGHT_CHROMIUM_PATH ?? '/opt/pw-browsers/chromium'`
+— a fallback that would only ever be correct on this one development
+sandbox.
+
+**What I thought caused it (hint given first):** *Hint: this line was
+written to solve a specific, local problem (avoiding a slow browser
+download in one environment) — now imagine this exact config file running
+on a GitHub Actions runner instead. What's actually at that path there?*
+
+**Root cause:** The fallback path was written to make local E2E runs fast
+*in this sandbox specifically* (a pre-installed Chromium at a fixed,
+non-standard path), but it applied unconditionally — any environment
+without `PLAYWRIGHT_CHROMIUM_PATH` explicitly set would still try to
+launch a browser from that exact sandbox-only path, which doesn't exist on
+a real CI runner (or most developers' machines).
+
+**Fix:** Only set `executablePath` when `PLAYWRIGHT_CHROMIUM_PATH` is
+explicitly provided; otherwise pass an empty `launchOptions`, letting
+Playwright fall back to its own normal (correct, portable) browser
+resolution.
+
+**Prevention:** A "helpful default" that encodes one specific
+environment's quirk is a portability bug in waiting — prefer explicit
+opt-in (an env var that must be set) over a default that silently assumes
+a specific machine's layout.
+
+### Interview questions
+
+1. **Why split lint/typecheck, server tests, and client tests into
+   separate CI jobs instead of one long job running everything in
+   sequence?** — Parallel execution (faster feedback) and independent
+   failure visibility (a lint failure doesn't bury a test failure in the
+   same log, and vice versa).
+2. **What does `needs: [build]` on the E2E job express, and why not just
+   let every job run independently?** — A genuine dependency: there's no
+   point running E2E tests against code that doesn't even build. `needs`
+   makes that ordering explicit instead of hoping jobs happen to finish in
+   a useful order.
+3. **Why is a hard-coded fallback path tied to one specific development
+   environment a bug, even though "it works" in that environment?** — Because
+   the code will run in other environments (CI, teammates' machines) where
+   that assumption doesn't hold; "works here" isn't the same as "correct" —
+   the earlier Phase 6 HSTS bug is the same category of mistake in a
+   different layer.
+
+### What I should remember
+
+- CI should run the *exact same* commands a developer could run locally —
+  no CI-only logic that could itself hide a bug.
+- Split independent checks into separate jobs for parallelism and clearer
+  failure attribution; use `needs` only for genuine dependencies.
+- Treat "fallback to a value specific to my current environment" as a
+  smell — prefer an explicit opt-in over a default that assumes one
+  machine's setup.
+- `concurrency` + `cancel-in-progress` avoids wasting CI minutes on runs
+  that are already obsolete by the time they'd finish.
+
+---
+
+### Phase 9 review
+
+**TOP 5 THINGS TO REMEMBER**
+1. CI runs the same commands a contributor runs locally — its value is
+   guaranteeing they actually happen, every time, with no exceptions.
+2. Split independent checks into parallel jobs; use `needs` only for real
+   dependencies (build needs lint-clean code; E2E needs a working build).
+3. A hard-coded environment-specific fallback is a portability bug waiting
+   to be discovered by a *different* environment.
+4. `concurrency` + `cancel-in-progress` saves CI time on superseded runs.
+5. Keep flaky-prone layers (E2E) visible in CI without necessarily making
+   them a hard merge-blocking gate, per the test pyramid's tradeoffs.
+
+**TOP 5 INTERVIEW QUESTIONS**
+1. What is CI, and what problem does it actually solve?
+2. Why run lint/tests/build as separate parallel jobs instead of one script?
+3. What does a `needs:` dependency between jobs express?
+4. Why might a team choose not to make E2E tests a required, merge-blocking
+   check, even though they run on every PR?
+5. What's an example of an "environment-specific default" bug, and how do
+   you prevent that category of bug in general?
+
+**TOP 3 DEVELOPMENT TIPS**
+1. Write CI to call the exact same npm scripts a developer runs locally —
+   never CI-only logic that could hide what actually happens.
+2. Fail fast: put the cheapest, fastest checks (lint) as a dependency for
+   the more expensive ones (build, E2E) so slow jobs don't run against
+   code that was always going to fail lint anyway.
+3. Prefer explicit environment-variable opt-ins over defaults that assume
+   a specific machine's setup — write it once assuming it'll run somewhere
+   you've never seen.
+
+**TOP 3 COMMON MISTAKES**
+1. One giant CI job doing everything serially — slow feedback, and one
+   failure's log output buries every other check's result.
+2. Making a flaky, environment-sensitive check (E2E) a hard-blocking gate
+   before it's proven stable, training the team to routinely bypass CI.
+3. Hard-coding a path/value that only happens to be correct in the
+   environment you personally tested in.
+
+**MINI CODING EXERCISE**
+Add a `docker` job to `ci.yml` that runs `docker compose build` (no need
+to run the containers) — verifying the Dockerfiles themselves stay
+buildable as the codebase changes, not just that the app builds outside
+a container.

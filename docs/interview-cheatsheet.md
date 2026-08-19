@@ -136,6 +136,22 @@ For a wide Q&A bank see [interview-question-bank.md](interview-question-bank.md)
   keeps history scannable and is exactly what `git log --oneline` should read
   like in a portfolio repo.
 
+## CI/CD
+
+- **CI vs. CD**: CI automatically *verifies* every change (lint, typecheck,
+  test, build); CD automatically *ships* a verified change to a real
+  environment. This project only implements CI — no live deploy target.
+- **Parallel jobs with `needs:`**: `lint-and-typecheck`, `server-tests`, and
+  `client-tests` run independently and in parallel; `build` waits on
+  `lint-and-typecheck`; `e2e` waits on `build` — dependencies are expressed
+  only where they're real.
+- **`concurrency` + `cancel-in-progress`**: a new commit on the same branch
+  cancels that branch's still-running workflow instead of wasting runner
+  time finishing a run nobody needs anymore.
+- **E2E is informative, not merge-blocking**: it runs on every PR for
+  visibility, but isn't treated as a required status check, since it's the
+  slowest and most environment-sensitive layer of the test pyramid.
+
 ## Authentication
 
 - **bcrypt** hashes passwords with a random salt baked into the output and
