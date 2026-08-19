@@ -1,7 +1,9 @@
 import express, { type Express } from 'express';
 import cors from 'cors';
 import helmet from 'helmet';
+import swaggerUi from 'swagger-ui-express';
 import { env } from './config/env.js';
+import { openApiSpec } from './docs/openapi.js';
 import { requestLogger } from './middleware/requestLogger.js';
 import { notFoundHandler } from './middleware/notFound.js';
 import { errorHandler } from './middleware/errorHandler.js';
@@ -24,6 +26,10 @@ export function createApp(): Express {
   app.use(cors({ origin: env.CORS_ORIGIN, credentials: true }));
   app.use(express.json({ limit: '100kb' }));
   app.use(requestLogger);
+
+  // Interactive API docs, generated from a hand-written OpenAPI spec —
+  // useful during manual testing/demos and as a reviewable API contract.
+  app.use('/api/docs', swaggerUi.serve, swaggerUi.setup(openApiSpec));
 
   app.use('/api/health', healthRouter);
   app.use('/api/auth', authRouter);

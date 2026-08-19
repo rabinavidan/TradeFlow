@@ -2111,3 +2111,164 @@ requests (e.g. a user clicking "Generate with AI" twice without changing
 any fields) don't re-hit Ollama — and explain, in a comment, why this
 cache should live entirely in the service layer and never affect the
 route/controller's error-handling contract.
+
+---
+
+## Phase 11 — Portfolio Polish
+
+### What we built
+
+The final pass that turns a working app into something ready to show:
+interactive API documentation (`GET /api/docs`, Swagger UI, served from a
+hand-written OpenAPI spec), a destructive-but-safe demo seed script
+(`npm run seed --workspace server`) producing three role accounts and five
+trade requests spanning every workflow status, real browser screenshots
+captured with Playwright and embedded in the README, an expanded README
+(demo accounts, deployment guidance, known limitations, future
+improvements), and three new docs aimed squarely at interview prep:
+`docs/interview-demo-script.md` (a live-demo walkthrough), 
+`docs/final-fullstack-interview-prep.md` (50 quick-review questions across
+the whole stack), and `docs/cv-description.md` (resume/portfolio text).
+
+### Concepts learned
+
+- **A hand-written API spec is a legitimate choice, not just "the lazy
+  option"**: generating OpenAPI from Zod schemas keeps them in sync
+  automatically, but adds a dependency and a build step; for a project this
+  size, a hand-written spec reviewed alongside the code it documents is a
+  reasonable, explainable tradeoff — the "right" answer depends on scale,
+  not on always picking the more automated tool.
+- **A destructive script needs its own safety net**: the seed script always
+  wipes existing data (so it's reproducible), which means it needs an
+  explicit guard of its own (`NODE_ENV=production` refusal) rather than
+  relying on "nobody would run this against a real database by accident."
+- **Seed through the real service layer, not raw inserts**: calling
+  `registerUser`/`createTrade`/`changeTradeStatus` instead of
+  `Model.insertMany(...)` guarantees seeded data is exactly as valid as
+  data created through the actual app — password hashing, status-transition
+  rules, and audit-trail entries all happen for real, not as a shortcut
+  that could silently drift from what the app actually enforces.
+- **Screenshots as a byproduct of a real smoke test, not a separate task**:
+  the same Playwright browser session used to visually verify the app
+  works is the natural place to also capture the images a README needs —
+  no separate manual "open the app and take screenshots" step.
+
+### Important code
+
+`server/src/scripts/seed.ts` — the production guard, checked before any
+destructive operation runs:
+
+```ts
+if (env.NODE_ENV === 'production') {
+  throw new Error('Refusing to run the destructive seed script against NODE_ENV=production');
+}
+```
+
+`server/src/app.ts` — mounting interactive docs from a plain TypeScript
+object (no code generation step):
+
+```ts
+app.use('/api/docs', swaggerUi.serve, swaggerUi.setup(openApiSpec));
+```
+
+### Important commands
+
+```bash
+npm run seed --workspace server           # load demo data (refuses on NODE_ENV=production)
+curl -s http://localhost:4000/api/docs/   # confirm Swagger UI is served
+```
+
+### Problems solved
+
+No new bug this phase — everything here was building on already-verified
+foundations (the AI feature's payload bug from Phase 10 was the last one
+found). The closest thing to a snag: the first screenshot script tried to
+click a generic `table tbody tr` locator to open a trade's details page,
+which didn't reliably trigger React Router navigation because the actual
+clickable element was a `<Link>` around just the title text, not the whole
+row. Fixed by targeting `table tbody tr td a` directly — a small reminder
+that a screenshot/E2E script needs to interact with the actual clickable
+element, the same discipline as the real E2E suite.
+
+### Interview questions
+
+1. What's the tradeoff between a hand-written and a generated OpenAPI spec?
+2. Why does a seed script need its own safety checks, even in a project
+   that already has role-based access control?
+3. Why seed data through the same service functions the API uses, instead
+   of inserting documents directly into MongoDB?
+
+### What I should remember
+
+- "More automated" isn't automatically "more correct" — match the tooling
+  to the project's actual scale and how much drift-risk is worth trading
+  for it.
+- A script that's destructive by design (a seed script, a reset script)
+  needs a guard against running in the wrong environment; "developers will
+  be careful" isn't a control.
+- Reusing the real service layer for setup/fixture data (seeding, tests)
+  keeps that data trustworthy — it went through every validation and
+  business rule the app itself enforces.
+
+---
+
+### Phase 11 review — and project wrap-up
+
+**TOP 5 THINGS TO REMEMBER (this phase)**
+1. A hand-written OpenAPI spec is a legitimate, explainable choice at small
+   scale — generation isn't automatically "more correct."
+2. A destructive script (seed/reset) needs its own explicit safety guard,
+   independent of the app's normal authorization.
+3. Seed data through real service functions, not raw model inserts, so it's
+   exactly as valid as data the app itself would produce.
+4. A live smoke test is also the cheapest place to capture real screenshots
+   — don't treat it as a separate task.
+5. Documentation that's actually useful in an interview (a demo script, a
+   quick-review question set) is worth building deliberately, not left as
+   an afterthought.
+
+**TOP 5 INTERVIEW QUESTIONS (this phase)**
+1. Hand-written vs. generated API docs — what's the tradeoff, and when
+   would you choose differently?
+2. How do you make a destructive database script safe to keep in a repo?
+3. Why route seed/fixture data through the application's own service layer?
+4. What would you add before this project could be considered
+   production-ready (not just portfolio-ready)?
+5. Walk through this project's request lifecycle end to end, from a button
+   click to a database write and back.
+
+**TOP 3 DEVELOPMENT TIPS**
+1. Build interview-prep material (demo script, quick Q&A, CV text) as part
+   of finishing a project, not as a rushed afterthought the night before an
+   interview.
+2. Keep "known limitations" and "future improvements" sections honest and
+   specific — vague hand-waving is less convincing than a concrete, scoped
+   list.
+3. A destructive convenience script earns its place in a repo only if it's
+   also safe by construction, not just "documented as dangerous."
+
+**TOP 3 COMMON MISTAKES**
+1. Treating documentation/polish as optional busywork instead of part of
+   what makes a portfolio project actually land in an interview.
+2. Writing a seed/reset script without a production guard, "because I'll
+   remember not to run it there."
+3. Under-preparing for the predictable follow-up questions ("what would you
+   change for production?", "walk me through the request lifecycle") that
+   come up in nearly every technical interview.
+
+**MINI CODING EXERCISE**
+Add a `GET /api/trades/export` endpoint (CSV of the caller's visible trade
+requests) and decide, deliberately: does it belong in the existing
+`trade.controller.ts`/`trade.service.ts`, or does CSV formatting deserve
+its own small module? Justify the choice in a one-line comment.
+
+---
+
+## Project complete
+
+All 11 phases (0 through 11) are done: a full-stack trade-finance workflow
+app with authentication, RBAC, a real state-machine-driven review workflow,
+analytics, a 72-scenario test suite (42 server + 22 client + 8 E2E),
+production-reliability basics, Docker, CI/CD, an optional local-AI feature,
+interactive API docs, and interview-ready documentation. See the README for
+where to start, and `docs/interview-demo-script.md` for how to show it off.

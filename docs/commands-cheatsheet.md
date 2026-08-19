@@ -116,6 +116,13 @@ curl -X PUT http://localhost:4000/api/trades/<id> -H "Authorization: Bearer <tok
 curl -X DELETE http://localhost:4000/api/trades/<id> -H "Authorization: Bearer <token>"
 ```
 
+## Demo data + API docs (Phase 11)
+
+```bash
+npm run seed --workspace server     # wipes DB, loads 3 demo users + 5 trades
+open http://localhost:4000/api/docs # interactive Swagger UI
+```
+
 ## Optional AI (Phase 10)
 
 ```bash

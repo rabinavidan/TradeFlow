@@ -168,6 +168,22 @@ For a wide Q&A bank see [interview-question-bank.md](interview-question-bank.md)
   explicitly converts default-ish form values to `undefined` before
   building the AI request payload.
 
+## API Docs (Swagger/OpenAPI) + Seed Data
+
+- **Hand-written, not generated**: `server/src/docs/openapi.ts` is a
+  hand-written OpenAPI 3.0 spec mounted at `/api/docs` via
+  `swagger-ui-express` — a deliberate tradeoff at this project's scale over
+  generating it from the Zod schemas (which stays in sync automatically but
+  adds tooling weight).
+- **Seed script safety**: `server/src/scripts/seed.ts` is deliberately
+  destructive (wipes Users/TradeRequests/StatusHistory) so re-running it
+  always produces a known state — guarded to refuse running when
+  `NODE_ENV=production`.
+- **Seeded via the real service layer**: the seed script calls
+  `registerUser`/`createTrade`/`changeTradeStatus` — the same functions the
+  API uses — instead of inserting documents directly, so seeded data is
+  guaranteed to be exactly as valid as data created through the app.
+
 ## Authentication
 
 - **bcrypt** hashes passwords with a random salt baked into the output and

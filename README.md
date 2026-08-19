@@ -9,14 +9,24 @@ admins act on them under role-based permissions.
 This is a technical portfolio project. It does not model real financial
 regulation.
 
-> **Status:** Phase 10 complete — the full application, a full test suite
-> (42 server + 22 client + 8 E2E), production-reliability basics, a full
-> Docker setup (`docker compose up --build` runs client + server + MongoDB
-> together), a GitHub Actions CI pipeline (lint, typecheck, build, unit/
-> integration tests, and E2E, in parallel jobs on every PR), and an optional
-> AI-assisted description generator backed by a local Ollama model. See
+> **Status:** All 11 phases complete — the full application, a full test
+> suite (42 server + 22 client + 8 E2E), production-reliability basics, a
+> full Docker setup (`docker compose up --build` runs client + server +
+> MongoDB together), a GitHub Actions CI pipeline, an optional AI-assisted
+> description generator backed by a local Ollama model, interactive API
+> docs (`GET /api/docs`), and a one-command demo seed script. See
 > [docs/learning-notes.md](docs/learning-notes.md) for phase-by-phase
 > progress and [docs](docs) for the full learning material.
+
+## Screenshots
+
+| Dashboard | Trade details |
+| --- | --- |
+| ![Dashboard](docs/screenshots/02-dashboard.png) | ![Trade details](docs/screenshots/04-trade-details.png) |
+
+| New trade request (with AI description) | Interactive API docs |
+| --- | --- |
+| ![New trade request](docs/screenshots/05-create-trade.png) | ![API docs](docs/screenshots/06-api-docs.png) |
 
 ## Stack
 
@@ -81,7 +91,18 @@ npm run dev:client   # http://localhost:5173
 Open http://localhost:5173 — the page pings `/api/health` on the server
 and shows the API/DB status, proving the two are wired together.
 
-### 4. Verify everything works
+### 4. (Optional) Load demo data
+
+```bash
+npm run seed --workspace server
+```
+
+Wipes and repopulates the database with three demo accounts (one per role)
+and five trade requests spanning every workflow status — see
+[Demo accounts](#demo-accounts) below. Refuses to run if
+`NODE_ENV=production`.
+
+### 5. Verify everything works
 
 ```bash
 npm run lint
@@ -122,6 +143,17 @@ ollama serve
 This is entirely optional: with Ollama not running, the button shows a
 small inline notice and the rest of the form works identically.
 
+## Demo accounts
+
+After running the seed script (`npm run seed --workspace server`), these
+accounts are ready to use — all share the password `demo-password-123`:
+
+| Email | Role | Notes |
+| --- | --- | --- |
+| `user@tradeflow.demo` | user | Owns all five seeded trade requests |
+| `reviewer@tradeflow.demo` | reviewer | Can move requests through review |
+| `admin@tradeflow.demo` | admin | Sees and can act on everything |
+
 ## Quick health check
 
 ```bash
@@ -132,6 +164,13 @@ curl http://localhost:4000/api/health
 { "status": "ok", "db": "connected", "uptimeSeconds": 12, "timestamp": "…" }
 ```
 
+## API documentation
+
+Interactive Swagger/OpenAPI docs are served at `/api/docs`
+(http://localhost:4000/api/docs when running locally) — every endpoint,
+request/response shape, and status code, generated from
+[server/src/docs/openapi.ts](server/src/docs/openapi.ts).
+
 ## Documentation
 
 - [docs/architecture.md](docs/architecture.md) — system diagram and data flow
@@ -140,12 +179,58 @@ curl http://localhost:4000/api/health
 - [docs/interview-cheatsheet.md](docs/interview-cheatsheet.md) — quick interview reference by topic
 - [docs/topic-tips-and-interview-questions.md](docs/topic-tips-and-interview-questions.md) — deep dive per topic
 - [docs/interview-question-bank.md](docs/interview-question-bank.md) — growing Q&A bank
+- [docs/interview-demo-script.md](docs/interview-demo-script.md) — a live-demo walkthrough for interviews
+- [docs/final-fullstack-interview-prep.md](docs/final-fullstack-interview-prep.md) — 50-question full-stack review
+- [docs/cv-description.md](docs/cv-description.md) — resume/CV blurbs for this project
+
+## Deployment
+
+There's no live deployment for this portfolio project, but the Docker setup
+is deploy-ready as-is:
+
+1. Push `server/Dockerfile` and `client/Dockerfile` images to a registry (or
+   build directly on the host) and run them with `docker-compose.yml` as a
+   starting point — most container platforms (Fly.io, Render, Railway, a
+   plain VPS with Docker Compose) can take this directly.
+2. Use a managed MongoDB (e.g. [MongoDB Atlas](https://www.mongodb.com/atlas))
+   instead of the `mongo` service for anything beyond a local demo, and set
+   `MONGODB_URI` accordingly.
+3. Set real values for `JWT_SECRET` (long, random) and `CORS_ORIGIN` (the
+   deployed frontend's actual origin) as environment variables — never
+   commit them.
+4. Terminate TLS in front of the app (a platform load balancer, or nginx/
+   Caddy) — `helmet`'s HSTS header is already gated on `NODE_ENV=production`
+   and only makes sense once real HTTPS is in place.
+5. Point CI (`.github/workflows/ci.yml`) at a deploy step once a real target
+   exists — today it stops at a verified build, deliberately, since there's
+   nothing to ship to yet.
 
 ## Known limitations
 
 - This is a demo app: no real payment rails, no real KYC/compliance logic.
-- Optional AI (Phase 10) requires a local [Ollama](https://ollama.com) install; the
+- Optional AI requires a local [Ollama](https://ollama.com) install; the
   app works fully without it.
+- No refresh tokens: a JWT is valid for `JWT_EXPIRES_IN` (default `1d`) and
+  then requires logging in again — acceptable for a demo, not for a
+  long-lived production session.
+- No file/document attachments on a trade request — a real trade-finance
+  workflow would need supporting documents (invoices, bills of lading).
+- No pagination on `StatusHistory`/audit trail — fine at this project's
+  scale, would need it for a request with a very long history.
+- Single MongoDB instance, no replica set — fine for a demo/portfolio
+  deployment, not for production durability guarantees.
+
+## Future improvements
+
+- Refresh tokens + silent re-auth, instead of a single long-lived JWT.
+- File attachments on trade requests (with size/type validation and
+  virus scanning in a real deployment).
+- Reviewer assignment (instead of any reviewer being able to act on any
+  submitted request) and email/webhook notifications on status changes.
+- Optimistic UI updates for status transitions, with rollback on failure.
+- A `docker` job in CI that builds (not just lints/tests) the Docker images
+  on every PR, catching Dockerfile regressions before merge.
+- Rate limiting beyond just auth endpoints, tuned per-route by cost.
 
 ## License
 
