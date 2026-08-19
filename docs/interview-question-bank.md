@@ -326,6 +326,34 @@ explicitly awaited via their observable result.
 **Follow-up Question:** Would this bug have been caught by a unit or
 component test instead? Why or why not?
 
+## Docker
+
+### Question: Why does the runtime stage of this project's Dockerfiles run a completely separate `npm install` instead of copying `node_modules` forward from the build stage?
+**Short Answer:** The build stage's `node_modules` reflects the whole
+workspace (both services' deps plus every dev dependency needed to
+compile); a fresh, standalone install from just the runtime service's own
+`package.json` produces a smaller, correctly-scoped image.
+**Strong Answer:** Because this is an npm workspace, the build stage's
+`npm ci` runs against the shared root lockfile and installs dependencies
+for *every* workspace — the server image's build stage temporarily has
+React, Vite, and every client devDependency present too, purely because
+the lockfile ties them together. None of that belongs in the final image:
+the compiled server only needs Express, Mongoose, a handful of runtime
+libraries, and nothing related to the client or to TypeScript itself
+(which is only needed to *produce* `dist/`, not to run it). The runtime
+stage's `npm install --omit=dev`, run against *only* `server/package.json`
+in complete isolation from the workspace, resolves and installs exactly
+what the compiled JavaScript needs — nothing more.
+**Project Example:** `server/Dockerfile`'s two `FROM node:22-alpine`
+stages — `build` and `runtime` — with completely different `COPY`/`RUN`
+steps for their respective installs.
+**Common Mistake:** Assuming "just copy node_modules from the build stage,
+it's simpler" — simpler to write, but ships an unnecessarily large,
+less-scoped image with build-only tooling and another service's
+dependencies along for the ride.
+**Follow-up Question:** What would you lose if the runtime stage's install
+used `npm install` (no lockfile involved) versus something closer to `npm ci`'s guarantees — and why doesn't a per-service lockfile exist here to fix that?
+
 ## Reliability
 
 ### Question: Why does this app handle SIGTERM instead of just letting the process die when stopped?

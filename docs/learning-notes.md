@@ -1477,3 +1477,220 @@ Split `/api/health` into `/api/health/live` (process is running — always
 200) and `/api/health/ready` (dependencies like MongoDB are reachable —
 what today's single `/api/health` does), matching the liveness/readiness
 distinction Kubernetes expects.
+
+---
+
+## Phase 8 — Docker
+
+### What we built
+
+- `server/Dockerfile`, `client/Dockerfile` — multi-stage builds. Both use
+  the **repo root** as their build context (not `./server` or `./client`),
+  because this is an npm workspace: compiling needs the shared root
+  `package-lock.json`, which doesn't exist inside either subdirectory.
+  - **Build stage**: full workspace install (`npm ci` at the root, with
+    every workspace's `package.json` present so the lockfile matches),
+    then compile just that one workspace (`npm run build --workspace ...`).
+  - **Runtime stage**: a completely standalone `npm install --omit=dev`
+    using *only* that service's own `package.json` — no workspace
+    entanglement, no unrelated deps (the server image never contains
+    React; the client image never contains Express) — then copy in just
+    the compiled output. The client's runtime stage doesn't even need
+    Node.js: `nginx:alpine` serves the static build directly.
+- `client/nginx.conf` — SPA fallback (`try_files ... /index.html`) so a
+  direct visit or refresh on a client-side route like `/trades/123` doesn't
+  404 against nginx, which only knows about real files.
+- `docker-compose.yml` — three services (`mongo`, `server`, `client`) on
+  one Docker network, talking to each other **by service name**
+  (`mongodb://mongo:27017/...`) rather than `localhost`. `mongo` has a
+  real healthcheck; `server` waits for it (`depends_on: condition:
+  service_healthy`) instead of just "container started" (which doesn't
+  mean "ready to accept connections").
+- `.dockerignore` — keeps `node_modules/`, `dist/`, `.git/`, and `.env*`
+  out of the build context.
+
+### Concepts learned
+
+**Build context vs. working directory.** A Dockerfile's `COPY` paths are
+relative to the *build context* (what you hand `docker build`), not to
+the Dockerfile's own location. Setting `context: .` (repo root) in
+`docker-compose.yml` while keeping `dockerfile: server/Dockerfile` lets
+the server's Dockerfile reach `client/package.json` and the root
+lockfile — necessary here specifically because of the npm workspace setup.
+
+**Two installs, two purposes.** The *build* stage's `npm ci` exists to
+compile TypeScript — it needs the full workspace, dev dependencies (typescript
+itself!), and a locked, reproducible dependency tree. The *runtime*
+stage's `npm install --omit=dev` exists only to give the compiled
+JavaScript its production dependencies at the smallest possible footprint
+— it doesn't need TypeScript, doesn't need the other workspace, and
+doesn't need to match a workspace-wide lockfile since it's just installing
+one package.json's dependencies fresh.
+
+**Service names ARE the DNS inside a Compose network.** `mongo`,
+`server`, and `client` can reach each other by those exact names
+(`mongo:27017`) because Docker Compose sets up an internal DNS resolving
+service names to container IPs on the shared network — this is why the
+containerized `MONGODB_URI` differs from the local-dev one
+(`mongodb://localhost:27017/...`).
+
+**A healthcheck changes what "depends_on" means.** Without a healthcheck,
+`depends_on: mongo` only waits for the mongo *container process* to start
+— not for MongoDB to actually be ready to accept connections, which can
+take a few seconds. `depends_on: { mongo: { condition: service_healthy }
+}` makes `server` wait for mongo's healthcheck to pass first, avoiding a
+race where the API tries to connect before the database is actually
+listening.
+
+### Important code
+
+```dockerfile
+# server/Dockerfile — build stage needs the whole workspace...
+FROM node:22-alpine AS build
+COPY package.json package-lock.json ./
+COPY server/package.json ./server/
+COPY client/package.json ./client/
+RUN npm ci
+RUN npm run build --workspace server
+
+# ...runtime stage needs none of that, just this one package.json
+FROM node:22-alpine AS runtime
+COPY server/package.json ./
+RUN npm install --omit=dev
+COPY --from=build /app/server/dist ./dist
+```
+
+```yaml
+# docker-compose.yml — service names as hostnames, and a real healthcheck
+server:
+  environment:
+    MONGODB_URI: mongodb://mongo:27017/tradeflow-lite   # not localhost
+  depends_on:
+    mongo:
+      condition: service_healthy   # not just "container started"
+```
+
+### Important commands
+
+```bash
+docker compose up --build       # build images (if needed) and start everything
+docker compose ps                # see running services
+docker compose logs -f server    # follow one service's logs
+docker compose down -v           # stop and remove containers + the mongo volume
+```
+
+### Problems solved
+
+**Bug (environment-specific, not a Dockerfile bug):** `docker compose
+build` failed inside `npm ci` with `npm error Exit handler never called!`,
+consistently, at almost exactly the same elapsed time on repeated attempts.
+
+**What I thought caused it (hint given first):** *Hint: a plain
+`wget https://registry.npmjs.org/` from inside a fresh, unmodified
+container — no Dockerfile involved at all — is a faster way to find out
+whether this is really about npm, or about something underneath it.*
+
+**Root cause:** This sandboxed development environment (not the Dockerfile,
+not the app) transparently intercepts outbound HTTPS with a TLS-terminating
+proxy (documented at `/root/.ccr/README.md`) that every tool must
+explicitly trust via a provided CA bundle. The host session has this trust
+already configured; a fresh Docker build container does not, so its HTTPS
+connections to the real npm registry fail TLS verification — visible with
+a plain `wget`/`node -e "https.get(...)"` test *before* even touching
+`npm ci`. In a normal environment (a real machine, most CI runners, most
+developers' laptops), this proxy doesn't exist and `npm ci` works
+unmodified — this was purely a constraint of verifying the build inside
+*this* sandbox.
+
+**Fix (for verification only, not shipped):** Temporarily mounted the
+sandbox's CA bundle into the build context and set
+`NODE_EXTRA_CA_CERTS` for the `npm ci`/`npm install` steps, confirmed both
+images build and the full stack (`docker compose up`) works end-to-end —
+register → dashboard → create trade, verified via a real headless
+browser against the running containers — then **reverted** that change
+before committing, since it's irrelevant (and would be misleading) for
+anyone actually running this Dockerfile on their own machine.
+
+**Prevention:** When a build step fails inside a sandboxed/CI environment
+and the error looks unrelated to your own code (a generic tool crash, not
+a clear application error), test the layer *underneath* your code first —
+here, "can this container reach the internet over HTTPS at all" — before
+assuming the Dockerfile itself is wrong.
+
+### Interview questions
+
+1. **Why is the Docker build context the repo root here, not `./server` or
+   `./client`?** — npm workspaces share one root lockfile; compiling one
+   workspace's TypeScript still needs `npm ci` to see the whole
+   workspace's `package.json` files to match the lockfile.
+2. **Why does the runtime stage run a completely separate, standalone
+   `npm install` instead of just copying `node_modules` from the build
+   stage?** — The build stage's `node_modules` reflects the *entire
+   workspace* (both client and server deps, plus every devDependency
+   needed to compile). A standalone install from just that service's
+   `package.json` produces a much smaller, correctly-scoped image with
+   only what the compiled JavaScript actually imports at runtime.
+3. **What does `depends_on: condition: service_healthy` add over plain
+   `depends_on: mongo`?** — Plain `depends_on` only waits for the
+   dependency's container process to *start*; `service_healthy` waits for
+   its healthcheck to actually pass, meaning the database is verified
+   ready to accept connections before the API container starts.
+
+### What I should remember
+
+- Docker `COPY` paths are relative to the build *context*, which you
+  choose independently of where the Dockerfile itself lives.
+- Separate "what's needed to build" from "what's needed to run" into
+  different stages — a slim runtime image is a direct result of that split.
+- `depends_on` alone only orders container *startup*, not readiness — pair
+  it with a real healthcheck when startup order actually matters.
+- When a sandboxed/CI environment's own constraints (proxies, restricted
+  egress) cause a failure, isolate and confirm that before assuming your
+  own code is at fault — and never leave environment-specific workarounds
+  in code meant to run elsewhere.
+
+---
+
+### Phase 8 review
+
+**TOP 5 THINGS TO REMEMBER**
+1. In an npm-workspace monorepo, the Docker build context needs to be the
+   repo root so `npm ci` can see the shared lockfile.
+2. Split Dockerfiles into a build stage (full toolchain) and a runtime
+   stage (only what's needed to run) — smaller, more secure final images.
+3. Compose services reach each other by service name over the internal
+   network, not `localhost`.
+4. `depends_on` orders startup; a healthcheck is what actually proves
+   readiness — use both together when order matters for correctness.
+5. Verify infrastructure failures against the layer underneath your own
+   code before assuming your code is the problem.
+
+**TOP 5 INTERVIEW QUESTIONS**
+1. What's the difference between a Docker image and a container?
+2. Why use multi-stage builds instead of one Dockerfile stage?
+3. How do containers on the same Docker Compose network communicate?
+4. What does a volume do, and why does the mongo service use one here?
+5. What's the difference between `depends_on` alone and `depends_on` with
+   a healthcheck condition?
+
+**TOP 3 DEVELOPMENT TIPS**
+1. Design the runtime stage's dependency install independently from the
+   build stage's — don't assume "copy node_modules forward" is the
+   simplest or smallest option.
+2. Give any service other containers must wait on a real healthcheck, not
+   just a fixed sleep or optimistic startup order.
+3. Keep `.dockerignore` in sync with `.gitignore`'s intent — anything that
+   shouldn't ship shouldn't be sent to the build context either.
+
+**TOP 3 COMMON MISTAKES**
+1. Using `localhost` instead of a service name inside a Compose network's
+   environment variables.
+2. Copying a full development `node_modules` into a production image
+   instead of doing a clean production-only install.
+3. Assuming `depends_on` guarantees a dependency is *ready*, not just that
+   its container has started.
+
+**MINI CODING EXERCISE**
+Add a `HEALTHCHECK` instruction to `server/Dockerfile` itself (curling
+`/api/health`), so `docker ps` reports the server container's health
+directly, independent of Compose's own healthcheck config.

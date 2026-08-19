@@ -56,12 +56,17 @@ npx playwright show-report e2e/playwright-report                               #
 npx playwright show-trace e2e/test-results/<test-dir>/trace.zip                # inspect one failure's trace
 ```
 
-## Docker (Phase 8)
+## Docker
 
 ```bash
-docker compose up --build
-docker compose down
-docker compose logs -f server
+docker compose up --build         # build (if needed) and start client + server + mongo
+docker compose up -d --build      # same, detached
+docker compose ps                 # see running services + health status
+docker compose logs -f server     # follow one service's logs
+docker compose down               # stop and remove containers
+docker compose down -v            # also remove the mongo data volume
+docker compose build server       # rebuild just one service's image
+docker exec -it tradeflow-server-1 sh   # shell into a running container
 ```
 
 ## CI (Phase 9)

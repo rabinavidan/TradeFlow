@@ -838,3 +838,59 @@ artifacts (`coverage/`, Playwright reports).
 Make a one-line change to `README.md`, then run `git diff` before staging
 and `git diff --staged` after — notice how the two commands show the same
 diff from different states of the working tree/index.
+
+---
+
+## N. Docker
+
+**Development Tips**
+- Use multi-stage builds: a build stage with the full toolchain, a runtime
+  stage with only what's needed to run — smaller, more secure final images.
+- In an npm-workspace monorepo, set the build context to the repo root so
+  `npm ci` can see the shared lockfile, even when building one service.
+- Give services other containers depend on a real healthcheck — `depends_on`
+  alone only orders container *startup*, not readiness.
+- Use `.dockerignore` to keep `node_modules/`, `.git/`, and secrets out of
+  the build context.
+
+**Common Mistakes**
+- Using `localhost` in a containerized service's config when it should be
+  the other service's Compose *service name*.
+- Copying a full development `node_modules` into the runtime image instead
+  of a clean, production-only install.
+- Assuming `depends_on: mongo` means "mongo is ready" rather than "mongo's
+  container has started."
+
+**Debugging Tips**
+- `docker compose logs -f <service>` for live logs; `docker compose ps`
+  for container/health status at a glance.
+- If a build step fails with a generic, tool-level error (not a clear
+  application error), test the layer underneath your code first — e.g. can
+  the container reach the network at all — before assuming your Dockerfile
+  is wrong.
+- `docker exec -it <container> sh` to poke around inside a running
+  container directly when logs alone aren't enough.
+
+**Interview Questions**
+1. Image vs. container — what's the difference?
+2. Why use a multi-stage Dockerfile?
+3. How do containers on the same Compose network find each other?
+4. What does a Docker volume do, and when do you need one?
+
+**Strong Interview Answers**
+- *Image vs. container?* An image is a read-only, versioned snapshot (a
+  filesystem + metadata) — the *recipe*. A container is a running (or
+  stopped) instance created *from* an image, with its own writable layer
+  on top — the *actual running thing*. One image can back many containers.
+
+**Project Example**
+`server/Dockerfile`'s build stage runs the full workspace `npm ci` +
+`tsc`; its runtime stage does a completely separate, standalone
+`npm install --omit=dev` from just `server/package.json`, then copies in
+the compiled `dist/` — two different installs for two different purposes.
+
+**Mini Exercise**
+Run `docker images` after building and compare the reported size of
+`tradeflow-server` against what a single-stage Dockerfile (keeping
+TypeScript, dev dependencies, and source files in the final image) would
+produce — explain the difference in your own words.

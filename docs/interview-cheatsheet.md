@@ -99,6 +99,24 @@ For a wide Q&A bank see [interview-question-bank.md](interview-question-bank.md)
   deliberately doesn't expose (e.g. promoting a role) — keep them isolated,
   well-commented, and never imported by application code.
 
+## Docker
+
+- **Multi-stage builds**: a build stage (full toolchain, compiles
+  TypeScript) and a separate runtime stage (only what's needed to run) —
+  the client's runtime stage doesn't even need Node.js, just nginx.
+- **Build context = repo root** for both Dockerfiles here, because npm
+  workspaces share one root lockfile; `dockerfile:` still points at
+  `server/Dockerfile` / `client/Dockerfile` in `docker-compose.yml`.
+- **Two separate npm installs**: the build stage's `npm ci` (full
+  workspace, needs TypeScript) vs. the runtime stage's standalone
+  `npm install --omit=dev` (just that service's own `package.json`) — kept
+  deliberately separate so the final image only has what it needs.
+- **Service names as hostnames**: `mongodb://mongo:27017/...` inside
+  Compose, not `localhost` — Compose's internal DNS resolves service names.
+- **`depends_on` + healthcheck**: plain `depends_on` only orders container
+  *startup*; `condition: service_healthy` waits for an actual healthcheck
+  to pass before starting the dependent service.
+
 ## Logging + Observability / Reliability
 
 - **Graceful shutdown**: handle `SIGTERM`, stop accepting new connections

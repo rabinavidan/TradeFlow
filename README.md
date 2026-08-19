@@ -9,11 +9,11 @@ admins act on them under role-based permissions.
 This is a technical portfolio project. It does not model real financial
 regulation.
 
-> **Status:** Phase 7 complete — the full application, a full test suite
-> (37 server + 20 client + 8 E2E), and production-reliability basics:
-> graceful shutdown on SIGTERM, process-level crash safety nets, and a
-> correlation id threaded through logs, response headers, and error
-> bodies. See
+> **Status:** Phase 8 complete — the full application, a full test suite
+> (37 server + 20 client + 8 E2E), production-reliability basics, and a
+> full Docker setup (`docker compose up --build` runs client + server +
+> MongoDB together) — verified end-to-end in a real browser against the
+> containerized stack. See
 > [docs/learning-notes.md](docs/learning-notes.md) for phase-by-phase
 > progress and [docs](docs) for the full learning material.
 
@@ -86,6 +86,22 @@ npm run build
 npm run test           # server + client unit/integration tests
 npm run test:e2e       # Playwright E2E suite (starts its own real servers + in-memory MongoDB)
 ```
+
+## Run with Docker
+
+No local Node.js or MongoDB install needed — everything runs in containers:
+
+```bash
+docker compose up --build
+```
+
+- Client: http://localhost:5173
+- Server: http://localhost:4000
+- MongoDB: exposed on `localhost:27017` (data persisted in a named volume)
+
+Set `JWT_SECRET` in a root `.env` file (see `.env.example`) to override the
+demo default. `docker compose down -v` stops everything and removes the
+MongoDB volume.
 
 ## Quick health check
 
