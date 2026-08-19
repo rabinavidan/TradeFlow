@@ -1,0 +1,23 @@
+{
+  "name": "tradeflow-lite",
+  "private": true,
+  "version": "1.0.0",
+  "description": "TradeFlow Lite - a portfolio-ready full-stack trade-finance workflow app",
+  "workspaces": [
+    "client",
+    "server"
+  ],
+  "scripts": {
+    "dev:client": "npm run dev --workspace client",
+    "dev:server": "npm run dev --workspace server",
+    "build": "npm run build --workspace server && npm run build --workspace client",
+    "lint": "npm run lint --workspace client && npm run lint --workspace server",
+    "typecheck": "npm run typecheck --workspace client && npm run typecheck --workspace server",
+    "test": "npm run test --workspace server && npm run test --workspace client",
+    "test:e2e": "playwright test --config e2e/playwright.config.ts",
+    "format": "prettier --write ."
+  },
+  "devDependencies": {
+    "prettier": "^3.3.3"
+  }
+}
