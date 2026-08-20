@@ -10,6 +10,7 @@ import { useAuth } from '../hooks/useAuth';
 import { StatusBadge } from '../components/StatusBadge';
 import { StatusActions } from '../components/StatusActions';
 import { StatusHistoryList } from '../components/StatusHistoryList';
+import { TradeStepper } from '../components/TradeStepper';
 import { getApiErrorMessage } from '../api/client';
 import type { TradeStatus } from '../types/trade';
 
@@ -79,6 +80,8 @@ export function TradeDetails() {
           {apiError}
         </p>
       )}
+
+      <TradeStepper status={trade.status} />
 
       <dl className="detail-list">
         <dt>Customer</dt>
