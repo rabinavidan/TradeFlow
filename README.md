@@ -241,6 +241,20 @@ next for a production system:
 | Single MongoDB instance, no replica set | Managed MongoDB with replication for durability |
 | Docker images aren't built in CI, only linted/tested | A `docker build` job to catch Dockerfile regressions pre-merge |
 
+## Contact
+
+Built and maintained by **Rabin Avidan**.
+
+- LinkedIn: [linkedin.com/in/rabin-avidan-1aab6653](https://www.linkedin.com/in/rabin-avidan-1aab6653/)
+- Email: [Rabin.Avidan.dev@gmail.com](mailto:Rabin.Avidan.dev@gmail.com)
+- Phone: +972 50-687-0046
+
 ## License
 
-Portfolio project — no license restrictions implied beyond showcasing the code.
+© 2026 Rabin Avidan. All rights reserved.
+
+This repository is published as a portfolio piece to demonstrate engineering
+work — reviewing and running the code (e.g. as part of a job application or
+technical interview) is welcome. No permission is granted to copy,
+redistribute, or reuse this code, in whole or in part, for any other
+purpose without prior written consent from the author.
