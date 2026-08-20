@@ -2309,3 +2309,70 @@ anyone who needs to dig in.
 
 Commands: see `docs/commands-cheatsheet.md`'s "Nightly E2E + Allure
 reports" section.
+
+---
+
+## Post-launch addition — App version + build signature in the UI
+
+A visible footer, rendered on every page (login/register included, via
+`App.tsx` rather than `Layout.tsx`, since unauthenticated pages don't use
+`Layout`): `TradeFlow Lite v{version} ({git sha}) · © {year} Rabin Avidan`,
+the name linking to LinkedIn.
+
+**How the version/commit reach the browser**: `client/vite.config.ts` uses
+Vite's `define` to inline two build-time constants —
+`__APP_VERSION__` (read from `client/package.json`) and `__GIT_SHA__`
+(`git rev-parse --short HEAD`, best-effort). `define` performs a literal
+text substitution at build time, not a runtime lookup — the values are
+baked into the production bundle, confirmed by grepping the built
+`dist/assets/*.js` for the actual commit hash after a real build.
+
+**One thing that needed a second file**: Vitest doesn't read
+`vite.config.ts` — it has its own `vitest.config.ts` — so a component
+test importing `Footer.tsx` hit a `ReferenceError` for `__APP_VERSION__`
+until the same `define` (with fixed test-only values) was added there too.
+A reminder that "two config files for one dev-server tool" is easy to
+forget when a value is defined in one but consumed from code both share.
+
+**The layout bug a plain component add revealed**: dropping `<Footer/>`
+in as a sibling after `<Routes/>` compiled fine and passed every existing
+test, but visually the footer never appeared without scrolling. Root
+cause: both `.auth-page` and `.app-shell` independently set
+`min-height: 100vh`, and the footer — rendered *after* whichever of those
+matched — was therefore guaranteed to start below the full viewport
+height, regardless of how little content the page had. Fixed by
+introducing one `.app-root` flex column (`min-height: 100vh`) wrapping
+`<Routes/>` + `<Footer/>`, and changing the three page-level wrappers
+(`.auth-page`, `.app-shell`, `.page-status`) from `min-height: 100vh` to
+`flex: 1` — so the matched page fills available space and the footer sits
+right after it, pinned to the bottom on short pages and pushed below the
+fold (correctly, with a scroll) on long ones. Caught by an actual browser
+screenshot, not by any of the 73 automated tests — none of them assert on
+where an element lands vertically in the viewport.
+
+### Interview questions
+
+1. What's the difference between a Vite `define` constant and a runtime
+   `import.meta.env.VITE_*` variable, and when would you use each?
+2. Why did a test importing a component that referenced a `define`d global
+   fail, even though the app itself built and ran fine?
+3. Two sibling elements each declare `min-height: 100vh` inside a
+   `display: flex; flex-direction: column` ancestor with no height of its
+   own — what actually happens, and why does swapping to `flex: 1` fix it?
+
+### What I should remember
+
+- A `define` value is a compile-time text substitution, not a runtime
+  read — it can't change without a rebuild, which is exactly what you want
+  for "what commit is this actually running," but the wrong tool for
+  anything that should update without redeploying.
+- Any build-time constant a component references needs to exist in every
+  tool that evaluates that component — a bundler's config and a test
+  runner's config are not automatically the same file, even when one is a
+  thin wrapper around the other's plugins.
+- `min-height: 100vh` on more than one nested element is a common way to
+  accidentally push later content below the fold — a single top-level
+  flex container with `min-height: 100vh` and `flex: 1` on its children is
+  the more composable pattern.
+- A passing test suite proves behavior, not layout — verify a visible UI
+  change by actually looking at it.
