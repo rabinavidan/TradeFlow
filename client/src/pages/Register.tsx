@@ -33,39 +33,51 @@ export function Register() {
 
   return (
     <main className="auth-page">
-      <form className="auth-form" onSubmit={handleSubmit(onSubmit)} noValidate>
-        <h1>Create an account</h1>
+      <div className="auth-shell">
+        <div className="auth-brand">
+          <div className="auth-brand-mark">
+            <span className="auth-brand-dot" aria-hidden="true" />
+            TradeFlow
+          </div>
+          <p className="auth-tagline">Every approval, traced from draft to signature.</p>
+          <p className="auth-foot">Trade‑finance workflow demo</p>
+        </div>
+        <div className="auth-panel">
+          <form className="auth-form" onSubmit={handleSubmit(onSubmit)} noValidate>
+            <h1>Create an account</h1>
 
-        {apiError && (
-          <p className="form-error" role="alert">
-            {apiError}
-          </p>
-        )}
+            {apiError && (
+              <p className="form-error" role="alert">
+                {apiError}
+              </p>
+            )}
 
-        <FormField label="Name" autoComplete="name" error={errors.name?.message} {...register('name')} />
-        <FormField
-          label="Email"
-          type="email"
-          autoComplete="email"
-          error={errors.email?.message}
-          {...register('email')}
-        />
-        <FormField
-          label="Password"
-          type="password"
-          autoComplete="new-password"
-          error={errors.password?.message}
-          {...register('password')}
-        />
+            <FormField label="Name" autoComplete="name" error={errors.name?.message} {...register('name')} />
+            <FormField
+              label="Email"
+              type="email"
+              autoComplete="email"
+              error={errors.email?.message}
+              {...register('email')}
+            />
+            <FormField
+              label="Password"
+              type="password"
+              autoComplete="new-password"
+              error={errors.password?.message}
+              {...register('password')}
+            />
 
-        <button type="submit" disabled={isSubmitting}>
-          {isSubmitting ? 'Creating account…' : 'Register'}
-        </button>
+            <button type="submit" disabled={isSubmitting}>
+              {isSubmitting ? 'Creating account…' : 'Register'}
+            </button>
 
-        <p className="auth-switch">
-          Already have an account? <Link to="/login">Log in</Link>
-        </p>
-      </form>
+            <p className="auth-switch">
+              Already have an account? <Link to="/login">Log in</Link>
+            </p>
+          </form>
+        </div>
+      </div>
     </main>
   );
 }
