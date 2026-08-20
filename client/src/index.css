@@ -62,14 +62,22 @@ a {
 }
 
 .page-status {
+  flex: 1;
+  width: 100%;
   max-width: 640px;
   margin: 4rem auto;
   padding: 0 1.5rem;
   text-align: center;
 }
 
-.auth-page {
+.app-root {
+  display: flex;
+  flex-direction: column;
   min-height: 100vh;
+}
+
+.auth-page {
+  flex: 1;
   display: flex;
   align-items: center;
   justify-content: center;
@@ -238,7 +246,7 @@ button:disabled {
 /* App shell / layout */
 
 .app-shell {
-  min-height: 100vh;
+  flex: 1;
   display: flex;
   flex-direction: column;
 }
@@ -295,6 +303,30 @@ button:disabled {
 
 .app-content {
   flex: 1;
+}
+
+.app-footer {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.5rem;
+  padding: 0.75rem 1.5rem;
+  color: var(--color-muted);
+  font-size: 0.8rem;
+  border-top: 1px solid var(--color-border);
+}
+
+.app-footer a {
+  color: var(--color-muted);
+  text-decoration: underline;
+}
+
+.app-footer a:hover {
+  color: var(--color-primary);
+}
+
+.app-footer-version {
+  font-variant-numeric: tabular-nums;
 }
 
 /* Page layout */

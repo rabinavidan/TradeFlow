@@ -4,7 +4,7 @@
 [![Nightly E2E](https://github.com/rabinavidan/TradeFlow/actions/workflows/nightly-e2e.yml/badge.svg)](https://github.com/rabinavidan/TradeFlow/actions/workflows/nightly-e2e.yml)
 ![Node](https://img.shields.io/badge/node-%3E%3D20-339933?logo=node.js&logoColor=white)
 ![TypeScript](https://img.shields.io/badge/TypeScript-strict-3178C6?logo=typescript&logoColor=white)
-![Tests](https://img.shields.io/badge/tests-72%20passing-brightgreen)
+![Tests](https://img.shields.io/badge/tests-73%20passing-brightgreen)
 
 A full-stack trade-finance workflow application: users submit **Trade
 Requests** (Letter of Credit, Guarantee, Collection, Other) and move them
@@ -16,7 +16,7 @@ Built end-to-end as a portfolio project to demonstrate production-grade
 engineering practice, not just a working feature set: a single
 source-of-truth state machine drives both server enforcement and client
 UX, every request boundary is validated on both sides, and the whole
-system is backed by a 72-scenario test suite, a Dockerized deployment, and
+system is backed by a 73-scenario test suite, a Dockerized deployment, and
 a CI pipeline with parallel jobs and nightly regression reporting.
 
 *(This is a technical demo — it does not model real financial regulation,
@@ -33,8 +33,8 @@ KYC, or payment rails.)*
   independently enforced on client and server, role-based authorization
   checked server-side on every request, environment-gated security
   headers, and rate-limited auth endpoints.
-- **72 tests across the pyramid.** 42 server (Vitest + Supertest against a
-  real in-memory MongoDB), 22 client (React Testing Library), 8 end-to-end
+- **73 tests across the pyramid.** 42 server (Vitest + Supertest against a
+  real in-memory MongoDB), 23 client (React Testing Library), 8 end-to-end
   (Playwright, Page Object Model) — plus a nightly scheduled E2E run with
   [Allure](https://allurereport.org) reporting for trend visibility.
 - **Ships in one command.** Multi-stage Docker builds and a Compose stack
@@ -148,7 +148,7 @@ npm run seed --workspace server
 
 ```bash
 npm run lint && npm run typecheck && npm run build
-npm run test           # 42 server + 22 client tests
+npm run test           # 42 server + 23 client tests
 npm run test:e2e       # 8 Playwright scenarios, starts its own real servers + in-memory MongoDB
 ```
 
