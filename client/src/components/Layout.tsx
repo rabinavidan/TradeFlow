@@ -11,9 +11,12 @@ export function Layout() {
 
   return (
     <div className="app-shell">
-      <header className="app-header">
-        <nav className="app-nav">
-          <span className="app-brand">TradeFlow Lite</span>
+      <aside className="rail">
+        <div className="rail-brand">
+          <span className="rail-brand-dot" aria-hidden="true" />
+          TradeFlow
+        </div>
+        <nav className="rail-nav">
           <NavLink to="/dashboard" className={navClass}>
             Dashboard
           </NavLink>
@@ -24,22 +27,25 @@ export function Layout() {
             New Request
           </NavLink>
         </nav>
-        <div className="app-user">
-          <span>
-            {user?.name} <span className="app-role">({user?.role})</span>
-          </span>
-          <button type="button" className="btn-secondary" onClick={logout}>
+        <div className="rail-user">
+          <div className="rail-user-id">
+            <div className="rail-user-name">{user?.name}</div>
+            <div className="rail-user-role">{user?.role}</div>
+          </div>
+          <button type="button" className="btn-secondary rail-logout" onClick={logout}>
             Log out
           </button>
         </div>
-      </header>
-      <div className="app-content">
-        <Outlet />
+      </aside>
+      <div className="main-col">
+        <div className="app-content">
+          <Outlet />
+        </div>
       </div>
     </div>
   );
 }
 
 function navClass({ isActive }: { isActive: boolean }): string {
-  return isActive ? 'app-nav-link active' : 'app-nav-link';
+  return isActive ? 'rail-link active' : 'rail-link';
 }
