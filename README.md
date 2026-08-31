@@ -51,9 +51,13 @@ KYC, or payment rails.)*
 
 ## Screenshots
 
-| Dashboard | Trade details |
+| Login | Dashboard |
 | --- | --- |
-| ![Dashboard](docs/screenshots/02-dashboard.png) | ![Trade details](docs/screenshots/04-trade-details.png) |
+| ![Login](docs/screenshots/01-login.png) | ![Dashboard](docs/screenshots/02-dashboard.png) |
+
+| Trade requests | Trade details |
+| --- | --- |
+| ![Trade requests](docs/screenshots/03-trade-list.png) | ![Trade details](docs/screenshots/04-trade-details.png) |
 
 | New trade request (with AI description) | Interactive API docs |
 | --- | --- |
